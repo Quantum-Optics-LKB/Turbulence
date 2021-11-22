@@ -28,7 +28,7 @@ def cache_2(x, y, center=np.array([1024, 1024]), out=True, nb_pix=2048):
     Y, X = np.ogrid[:nb_pix, :nb_pix]
     dist_from_center_x = np.abs(X - center[0])
     dist_from_center_y = np.abs(Y - center[1])
-    
+   
     if out:
         mask_x = dist_from_center_x <= x
         mask_y = dist_from_center_y <= y
