@@ -64,7 +64,7 @@ def r2(im):
 
     im = im - np.mean(im[0:100,0:100])
     im= im/np.max(im)
-
+    
     centre_x, centre_y = tools.centre(im)
     x = (np.linspace(0,2048,2048) - centre_x)*pix/grand
     y = (np.linspace(0,2048,2048) - centre_y)*pix/grand
