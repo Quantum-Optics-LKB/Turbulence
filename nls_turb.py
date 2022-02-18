@@ -16,6 +16,9 @@ import matplotlib.pyplot as plt
 from scipy.constants import epsilon_0, hbar, c, mu_0
 from scipy.ndimage import zoom
 import sys
+import julia
+jl = julia.Julia(runtime="/opt/julia-1.6.5/bin/julia")
+from julia import Main
 # sys.path.append('/home/guillaume/Documents/cours/M2/stage/simulation')
 # from azim_avg import azimuthalAverage as az_avg
 # import contrast
@@ -219,7 +222,7 @@ class NLSE:
         Z = np.arange(0, z, step=delta_Z, dtype=np.float32)
         NZ = len(Z)
         # A = np.zeros([NX, NY]) + 0j
-        A = pyfftw.empty_aligned((3, self.NX, self.NY), dtype=np.complex128)
+        A = pyfftw.empty_aligned((3, self.NX, self.NY), dtype=np.complex64)
         A[:, :, :] = self.E_00*np.array([E_in_0, E_in_1, E_in_2])
 
         # definition of the Fourier frequencies for the linear step
@@ -260,16 +263,28 @@ class NLSE:
 
             return A
 
-        A = cp.asarray(A)
-        n2_old = self.n2
-        for i, z in enumerate(Z):
-            if z > self.L:
-                self.n2 = 0
-            sys.stdout.write(f"\rIteration {i+1}/{len(Z)}")
-            A[:, :, :] = split_step_cp(A)
-        print()
-        self.n2 = n2_old
-        A = cp.asnumpy(A)
+        # A = cp.asarray(A)
+        # n2_old = self.n2
+        # for i, z in enumerate(Z):
+        #     if z > self.L:
+        #         self.n2 = 0
+        #     sys.stdout.write(f"\rIteration {i+1}/{len(Z)}")
+        #     A[:, :, :] = split_step_cp(A)
+        # print()
+        # self.n2 = n2_old
+        # A = cp.asnumpy(A)
+        # import various stuff to the Main Julia scope
+        Main.eval(f"k = {self.k}")
+        Main.eval(f"n2 = {self.n2}")
+        Main.eval(f"c = {c}")
+        Main.eval(f"epsilon_0 = {epsilon_0}")
+        Main.eval(f"alpha = {self.alpha}")
+        Main.eval(f"delta_X = {self.delta_X}")
+        Main.eval(f"delta_Y = {self.delta_Y}")
+        prop = jl.include('propagate_fwm.jl')
+        # with open("propagate_fwm.jl") as f:
+        #     A = Main.eval(f.read())
+        A[:, :, :] = np.array(prop(A, z))[0, :, :, :]
 
         if plot == True:
             for i in range(A.shape[0]):
@@ -360,32 +375,32 @@ if __name__ == "__main__":
     n2 = -4e-10
     waist = 1e-3
     window = 2048*5.5e-6
-    puiss = 60e-3
-    probe = 1e-3
+    puiss = 400e-3
+    probe = 60e-3
     L = 5e-2
     simu = NLSE(trans, puiss, waist, window, n2, L, NX=2048, NY=2048)
     phase_slm = 2*np.pi*flatTop_super(1272, 1024, length=1272, width=1024)
     phase_slm = simu.slm(phase_slm, 6.25e-6)
-    # plt.imshow(phase_slm, cmap='twilight', vmin=-np.pi, vmax=np.pi)
+    # plt.imshow(phase_slm, cmap='twilight', vmin=-np.pi, vmSax=np.pi)
     # plt.show()
-    E_in_0 = np.ones((simu.NY, simu.NX), dtype=np.complex128) * \
+    E_in_0 = np.ones((simu.NY, simu.NX), dtype=np.complex64) * \
         np.exp(-(simu.XX**2 + simu.YY**2)/(2*simu.waist**2))
-    E_in_2 = np.sqrt(probe/puiss)*np.ones((simu.NY, simu.NX), dtype=np.complex128) * \
+    E_in_1 = np.sqrt(probe/puiss)*np.ones((simu.NY, simu.NX), dtype=np.complex64) * \
         np.exp(-(simu.XX**2 + simu.YY**2)/(2*(0.33*simu.waist)**2))
     # E_in_0 += 5e-2*np.random.random(E_in_0.shape)
     # E_in_0 /= np.nanmax(E_in_0)
-    # E_in_0 *= np.exp(1j*phase_slm)  # + 0.1*np.random.random(E_in_0.shape)
-    # E_in_0 = np.fft.fftshift(np.fft.fft2(E_in_0))
-    # E_in_0[0:E_in_0.shape[0]//2+20, :] = 1e-10
-    # E_in_0[E_in_0.shape[0]//2+225:, :] = 1e-10
-    # E_in_0 = np.fft.ifft2(np.fft.ifftshift(E_in_0))
+    E_in_0 *= np.exp(1j*phase_slm)  # + 0.1*np.random.random(E_in_0.shape)
+    E_in_0 = np.fft.fftshift(np.fft.fft2(E_in_0))
+    E_in_0[0:E_in_0.shape[0]//2+20, :] = 1e-10
+    E_in_0[E_in_0.shape[0]//2+225:, :] = 1e-10
+    E_in_0 = np.fft.ifft2(np.fft.ifftshift(E_in_0))
     # plt.imshow(np.log10(np.abs(np.fft.fftshift(np.fft.fft2(E_in_0)))))
     # plt.imshow(np.abs(E_in_0))
     # plt.show()
     # E_in_1 = 1e-12 * np.ones((simu.NY, simu.NX), dtype=np.complex64)
-    E_in_1 = 1e-6 * np.ones((simu.NY, simu.NX), dtype=np.complex128)
-    E_in_2 *= np.exp(-1j*1e4*simu.YY)
-    E_in_1 *= np.exp(1j*1e4*simu.YY)
+    E_in_2 = 1e-6 * np.ones((simu.NY, simu.NX), dtype=np.complex64)
+    E_in_1 *= np.exp(-1j*1e4*simu.YY)
+    E_in_2 *= np.exp(1j*1e4*simu.YY)
     # plt.imshow(np.log10(np.abs(np.fft.fftshift(np.fft.fft2(E_in_1)))))
     # plt.imshow(np.abs(E_in_0))
     # plt.show()
@@ -413,4 +428,4 @@ if __name__ == "__main__":
     # ax1[1, 1].set_title("arg($E_3$)")
     # plt.show()
     # A = simu.E_out(E_in_0, 1e-3, plot=True)
-    A = simu.E_out_FWM(E_in_0, E_in_1, E_in_2, z=50e-3, plot=True)
+    A = simu.E_out_FWM(E_in_0, E_in_1, E_in_2, L, plot=True)
