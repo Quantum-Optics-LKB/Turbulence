@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-@author: sskupin
+@author: Taladjidi
 Solves NLS equation with spectral operator splitting scheme
 dA/dZ = i d^2A/dX^2 + i V(X,Z) A - i |A|^2 A
 for given A(Z=0) for 0<Z<L
@@ -10,31 +10,26 @@ for given A(Z=0) for 0<Z<L
 import sys
 import time
 
-# import cupy as cp
-import julia
+import cupy as cp
+# import julia
 import matplotlib.pyplot as plt
 import numpy as np
 import pyfftw
-from julia import Main
+# from julia import Main
 from scipy.constants import c, epsilon_0, hbar, mu_0
 from scipy.ndimage import zoom
 
-# sys.path.append('/home/guillaume/Documents/cours/M2/stage/simulation')
-# from azim_avg import azimuthalAverage as az_avg
-# import contrast
-# import tools
+
+@cp.fuse(kernel_name="nl_prop")
+def nl_prop(a: float, b: float, c: complex):
+    return c*a*cp.exp(1j*b*cp.abs(c)**2)
 
 
-# @cp.fuse(kernel_name="nl_prop")
-# def nl_prop(a: float, b: float, c: complex):
-#     return c*a*cp.exp(1j*b*cp.abs(c)**2)
-
-
-# def divide_where(a, b, th):
-#     c = cp.empty_like(a)
-#     c[b >= th] = a[b >= th]/b[b >= th]
-#     c[b < th] = 0
-#     return c
+def divide_where(a, b, th):
+    c = cp.empty_like(a)
+    c[b >= th] = a[b >= th]/b[b >= th]
+    c[b < th] = 0
+    return c
 
 
 class NLSE:
@@ -146,45 +141,49 @@ class NLSE:
         Ky = 2 * np.pi * np.fft.fftfreq(self.NY, d=self.delta_Y)
 
         Kxx, Kyy = np.meshgrid(Kx, Ky)
-        propagator = np.exp(-1j * 0.5 * (Kxx**2 + Kyy**2)/self.k * delta_Z)
-        # propagator_cp = cp.asarray(propagator)
+        propagator = np.exp(-1j * 0.25 * (Kxx**2 + Kyy**2) /
+                            self.k * delta_Z)  # symetrized
+        propagator_cp = cp.asarray(propagator)
 
-        # def split_step_cp(A):
-        #     """computes one propagation step"""
-        #     # A = A * np.exp(-self.alpha*delta_Z)*cp.exp(1j * self.k * self.n2*c*epsilon_0 *
-        #     #                                            cp.abs(A)**2 * delta_Z)
-        #     A = nl_prop(np.exp(-self.alpha*delta_Z), self.k *
-        #                 self.n2*c*epsilon_0 * delta_Z, A)
-        #     A = cp.fft.fft2(A)
-        #     A *= propagator_cp  # linear step in Fourier domain (shifted)
-        #     A = cp.fft.ifft2(A)
-        # return A
+        def split_step_cp(A):
+            """computes one propagation step"""
+            # A = A * np.exp(-self.alpha*delta_Z)*cp.exp(1j * self.k * self.n2*c*epsilon_0 *
+            #                                            cp.abs(A)**2 * delta_Z)
+            A = cp.fft.fft2(A)
+            A *= propagator_cp  # linear step in Fourier domain (shifted)
+            A = cp.fft.ifft2(A)
+            A = nl_prop(np.exp(-self.alpha*delta_Z), self.k *
+                        self.n2*c*epsilon_0 * delta_Z, A)
+            A = cp.fft.fft2(A)
+            A *= propagator_cp  # linear step in Fourier domain (shifted)
+            A = cp.fft.ifft2(A)
+            return A
 
-        # A = cp.asarray(A)
-        # n2_old = self.n2
-        # for i, z in enumerate(Z):
-        #     if z > self.L:
-        #         self.n2 = 0
-        #     sys.stdout.write(f"\rIteration {i+1}/{len(Z)}")
-        #     A[:, :] = split_step_cp(A)
-        # print()
-        # self.n2 = n2_old
-        # A = cp.asnumpy(A)
+        A = cp.asarray(A)
+        n2_old = self.n2
+        for i, z in enumerate(Z):
+            if z > self.L:
+                self.n2 = 0
+            sys.stdout.write(f"\rIteration {i+1}/{len(Z)}")
+            A[:, :] = split_step_cp(A)
+        print()
+        self.n2 = n2_old
+        A = cp.asnumpy(A)
 
         # for i in range(NZ-1):
         #     sys.stdout.write(f"\rIteration {i+1}/{NZ-1}")
         #     A = split_step_fftw(A)
-        Main.eval(f"k = {self.k}")
-        Main.eval(f"n2 = {self.n2}")
-        Main.eval(f"c = {c}")
-        Main.eval(f"epsilon_0 = {epsilon_0}")
-        Main.eval(f"alpha = {self.alpha}")
-        Main.eval(f"delta_X = {self.delta_X}")
-        Main.eval(f"delta_Y = {self.delta_Y}")
-        prop = Main.include("propagate.jl")
-        t0 = time.perf_counter()
-        A[:, :] = np.array(prop(A, z))[0, :, :]
-        print(f"Time spent to solve : {time.perf_counter()-t0} s")
+        # Main.eval(f"k = {self.k}")
+        # Main.eval(f"n2 = {self.n2}")
+        # Main.eval(f"c = {c}")
+        # Main.eval(f"epsilon_0 = {epsilon_0}")
+        # Main.eval(f"alpha = {self.alpha}")
+        # Main.eval(f"delta_X = {self.delta_X}")
+        # Main.eval(f"delta_Y = {self.delta_Y}")
+        # prop = Main.include("propagate.jl")
+        # t0 = time.perf_counter()
+        # A[:, :] = np.array(prop(A, z))[0, :, :]
+        # print(f"Time spent to solve : {time.perf_counter()-t0} s")
         if plot == True:
             fig = plt.figure(3, [9, 8])
 
@@ -227,7 +226,7 @@ class NLSE:
         """
 
         # normalized longitudinal coordinate
-        delta_Z = 2e-5*self.z_r
+        delta_Z = 1e-5*self.z_r
         Z = np.arange(0, z, step=delta_Z, dtype=np.float32)
         NZ = len(Z)
         # A = np.zeros([NX, NY]) + 0j
@@ -239,63 +238,66 @@ class NLSE:
         Ky = 2 * np.pi * np.fft.fftfreq(self.NY, d=self.delta_Y)
 
         Kxx, Kyy = np.meshgrid(Kx, Ky)
-        propagator = np.exp(-1j * 0.5 * (Kxx**2 + Kyy**2)/self.k * delta_Z)
+        propagator = np.exp(-1j * 0.25 * (Kxx**2 + Kyy**2)/self.k * delta_Z)
         # apply hyper gaussian filtering to kill parasitic high frequencies
         propagator *= np.exp(-((Kxx**2 + Kyy**2)/(2*0.4e6**2))**8)
         # plt.imshow(np.fft.fftshift(np.abs(propagator)))
         # plt.show()
-        # propagator_cp = cp.asarray(propagator)
+        propagator_cp = cp.asarray(propagator)
         threshold = 1e-1
 
-        # def split_step_cp(A):
-        #     """computes one propagation step"""
-        #     # toto = cp.abs(2*A[2, :, :]*A[3, :, :]*cp.conj(A[0, :, :])/(A[1, :, :] *
-        #     #                                                            (cp.abs(A[1, :, :]) > 1e-9)+1e-9*(cp.abs(A[1, :, :]) < 1e-9)))
-        #     # plt.imshow(cp.asnumpy(
-        #     #     toto))
-        #     # plt.show()
-        #     A[0, :, :] = A[0, :, :] * cp.exp(1j * self.k * self.n2*c*epsilon_0 * (
-        #         cp.abs(A[0, :, :])**2 + 2*cp.abs(A[1, :, :])**2 + 2*cp.abs(A[2, :, :])**2 +
-        #         divide_where(2*A[2, :, :]*A[1, :, :]*cp.conj(A[0, :, :]), A[0, :, :], threshold)) * delta_Z)
-        #     A[1, :, :] = A[1, :, :] * cp.exp(1j * self.k * self.n2*c*epsilon_0 * (
-        #         cp.abs(A[1, :, :])**2 + 2*cp.abs(A[0, :, :])**2 + 2*cp.abs(A[2, :, :])**2 +
-        #         divide_where(A[0, :, :]**2 * cp.conj(A[2, :, :]), A[1, :, :], threshold)) * delta_Z)
-        #     A[2, :, :] = A[2, :, :] * cp.exp(1j * self.k * self.n2*c*epsilon_0 * (
-        #         cp.abs(A[2, :, :])**2 + 2*cp.abs(A[0, :, :])**2 + 2*cp.abs(A[1, :, :])**2 +
-        #         divide_where(A[0, :, :]**2 * cp.conj(A[1, :, :]), A[2, :, :], threshold)) * delta_Z)
-        #     A *= np.exp(-self.alpha*delta_Z)
-        #     # plt.imshow(np.abs(cp.asnumpy(A[2, :, :])))
-        #     # plt.show()
-        #     A = cp.fft.fft2(A, axes=(1, 2))
-        #     A *= propagator_cp  # linear step in Fourier domain (shifted)
-        #     A = cp.fft.ifft2(A, axes=(1, 2))
+        def split_step_cp(A):
+            """computes one propagation step"""
+            # toto = cp.abs(2*A[2, :, :]*A[3, :, :]*cp.conj(A[0, :, :])/(A[1, :, :] *
+            #                                                            (cp.abs(A[1, :, :]) > 1e-9)+1e-9*(cp.abs(A[1, :, :]) < 1e-9)))
+            # plt.imshow(cp.asnumpy(
+            #     toto))
+            # plt.show()
+            A = cp.fft.fft2(A, axes=(1, 2))
+            A *= propagator_cp  # linear step in Fourier domain (shifted)
+            A = cp.fft.ifft2(A, axes=(1, 2))
+            A[0, :, :] = A[0, :, :] * cp.exp(1j * self.k * self.n2*c*epsilon_0 * (
+                cp.abs(A[0, :, :])**2 + 2*cp.abs(A[1, :, :])**2 + 2*cp.abs(A[2, :, :])**2 +
+                divide_where(2*A[2, :, :]*A[1, :, :]*cp.conj(A[0, :, :]), A[0, :, :], threshold)) * delta_Z)
+            A[1, :, :] = A[1, :, :] * cp.exp(1j * self.k * self.n2*c*epsilon_0 * (
+                cp.abs(A[1, :, :])**2 + 2*cp.abs(A[0, :, :])**2 + 2*cp.abs(A[2, :, :])**2 +
+                divide_where(A[0, :, :]**2 * cp.conj(A[2, :, :]), A[1, :, :], threshold)) * delta_Z)
+            A[2, :, :] = A[2, :, :] * cp.exp(1j * self.k * self.n2*c*epsilon_0 * (
+                cp.abs(A[2, :, :])**2 + 2*cp.abs(A[0, :, :])**2 + 2*cp.abs(A[1, :, :])**2 +
+                divide_where(A[0, :, :]**2 * cp.conj(A[1, :, :]), A[2, :, :], threshold)) * delta_Z)
+            A *= np.exp(-self.alpha*delta_Z)
+            # plt.imshow(np.abs(cp.asnumpy(A[2, :, :])))
+            # plt.show()
+            A = cp.fft.fft2(A, axes=(1, 2))
+            A *= propagator_cp  # linear step in Fourier domain (shifted)
+            A = cp.fft.ifft2(A, axes=(1, 2))
 
-        #     return A
+            return A
 
-        # A = cp.asarray(A)
-        # n2_old = self.n2
-        # for i, z in enumerate(Z):
-        #     if z > self.L:
-        #         self.n2 = 0
-        #     sys.stdout.write(f"\rIteration {i+1}/{len(Z)}")
-        #     A[:, :, :] = split_step_cp(A)
-        # print()
-        # self.n2 = n2_old
-        # A = cp.asnumpy(A)
+        A = cp.asarray(A)
+        n2_old = self.n2
+        for i, z in enumerate(Z):
+            if z > self.L:
+                self.n2 = 0
+            sys.stdout.write(f"\rIteration {i+1}/{len(Z)}")
+            A[:, :, :] = split_step_cp(A)
+        print()
+        self.n2 = n2_old
+        A = cp.asnumpy(A)
         # import various stuff to the Main Julia scope
-        Main.eval(f"k = {self.k}")
-        Main.eval(f"n2 = {self.n2}")
-        Main.eval(f"c = {c}")
-        Main.eval(f"epsilon_0 = {epsilon_0}")
-        Main.eval(f"alpha = {self.alpha}")
-        Main.eval(f"delta_X = {self.delta_X}")
-        Main.eval(f"delta_Y = {self.delta_Y}")
-        prop = Main.include('propagate_fwm.jl')
+        # Main.eval(f"k = {self.k}")
+        # Main.eval(f"n2 = {self.n2}")
+        # Main.eval(f"c = {c}")
+        # Main.eval(f"epsilon_0 = {epsilon_0}")
+        # Main.eval(f"alpha = {self.alpha}")
+        # Main.eval(f"delta_X = {self.delta_X}")
+        # Main.eval(f"delta_Y = {self.delta_Y}")
+        # prop = Main.include('propagate_fwm.jl')
         # with open("propagate_fwm.jl") as f:
         #     A = Main.eval(f.read())
-        t0 = time.perf_counter()
-        A[:, :, :] = np.array(prop(A, z))[0, :, :, :]
-        print(f"Time spent to solve : {time.perf_counter()-t0} s")
+        # t0 = time.perf_counter()
+        # A[:, :, :] = np.array(prop(A, z))[0, :, :, :]
+        # print(f"Time spent to solve : {time.perf_counter()-t0} s")
 
         if plot == True:
             for i in range(A.shape[0]):
@@ -389,9 +391,9 @@ if __name__ == "__main__":
     puiss = 1
     probe = 60e-3
     L = 5e-2
-    simu = NLSE(trans, puiss, waist, window, n2, L, NX=256, NY=256)
-    phase_slm = 2*np.pi*flatTop_tur(1272, 1024, length=1000, width=600)
-    # phase_slm = 2*np.pi*flatTop_super(1272, 1024, length=1272, width=1024)
+    simu = NLSE(trans, puiss, waist, window, n2, L, NX=2048, NY=2048)
+    # phase_slm = 2*np.pi*flatTop_tur(1272, 1024, length=1000, width=600)
+    phase_slm = 2*np.pi*flatTop_super(1272, 1024, length=1272, width=1024)
     phase_slm = simu.slm(phase_slm, 6.25e-6)
     # plt.imshow(phase_slm, cmap='twilight', vmin=-np.pi, vmSax=np.pi)
     # plt.show()
@@ -411,8 +413,8 @@ if __name__ == "__main__":
     # plt.show()
     E_in_1 = 1e-6 * np.ones((simu.NY, simu.NX), dtype=np.complex64)
     E_in_2 = 1e-6 * np.ones((simu.NY, simu.NX), dtype=np.complex64)
-    E_in_1 *= np.exp(-1j*1e4*simu.YY)
-    E_in_2 *= np.exp(1j*1e4*simu.YY)
+    # E_in_1 *= np.exp(-1j*1e4*simu.YY)
+    # E_in_2 *= np.exp(1j*1e4*simu.YY)
     # plt.imshow(np.log10(np.abs(np.fft.fftshift(np.fft.fft2(E_in_1)))))
     # plt.imshow(np.abs(E_in_0))
     # plt.show()
