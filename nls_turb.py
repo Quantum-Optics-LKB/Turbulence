@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-@author: sskupin
+@author: Taladjidi
 Solves NLS equation with spectral operator splitting scheme
 
 dA/dZ = i d^2A/dX^2 + i V(X,Z) A - i |A|^2 A
 
 for given A(Z=0) for 0<Z<L
 """
+from julia import Main
 import numpy as np
 import cupy as cp
 import pyfftw
@@ -18,7 +19,6 @@ from scipy.ndimage import zoom
 import sys
 import julia
 jl = julia.Julia(runtime="/opt/julia-1.6.5/bin/julia")
-from julia import Main
 # sys.path.append('/home/guillaume/Documents/cours/M2/stage/simulation')
 # from azim_avg import azimuthalAverage as az_avg
 # import contrast
