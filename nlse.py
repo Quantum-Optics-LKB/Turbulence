@@ -7,23 +7,38 @@ Solves NLS equation with spectral operator splitting scheme
 dA/dZ = i d^2A/dX^2 + i V(X,Z) A - i |A|^2 A
 for given A(Z=0) for 0<Z<L
 """
-import sys
-import time
+import numba
 import pyfftw
-import pickle
+from scipy.ndimage import zoom
+from scipy.constants import c, epsilon_0, hbar, mu_0
+import numpy as np
+import matplotlib.pyplot as plt
 import multiprocessing
+import pickle
+import time
+import sys
+BACKEND = "CPU"
 try:
     import cupy as cp
     import cupyx.scipy.fftpack as fftpack
     BACKEND = "GPU"
+
+    @cp.fuse(kernel_name="nl_prop")
+    def nl_prop(A: cp.ndarray, dz: float, alpha: float, V: cp.ndarray, g: float):
+        A *= cp.exp(dz*(-alpha/2 + 1j * V + 1j*g*cp.abs(A)**2))
 except ImportError:
     print("CuPy not available, falling back to CPU backend ...")
+    import pyfftw
+    import numba
     pyfftw.config.NUM_THREADS = multiprocessing.cpu_count()
     BACKEND = "CPU"
-import matplotlib.pyplot as plt
-import numpy as np
-from scipy.constants import c, epsilon_0, hbar, mu_0
-from scipy.ndimage import zoom
+
+    @numba.njit(parallel=True, fastmath=True)
+    def nl_prop(A: np.ndarray, dz: float, alpha: float, V: np.ndarray, g: float):
+        for i in numba.prange(A.shape[0]):
+            for j in range(A.shape[1]):
+                A[i, j] *= np.exp(dz*(-alpha/2 + 1j *
+                                  V[i, j] + 1j*g*abs(A[i, j])**2))
 
 
 class NLSE:
@@ -124,12 +139,15 @@ class NLSE:
               x_center:x_center+phase_zoomed.shape[1]] = phase_zoomed
         return phase
 
-    def E_out(self, E_in: np.ndarray, z: float, plot=False) -> np.ndarray:
+    def E_out(self, E_in: np.ndarray, z: float, plot=False, precision: str = "single") -> np.ndarray:
         """Propagates the field at a distance z
         Args:
             E_in (np.ndarray): Normalized input field (between 0 and 1)
             z (float): propagation distance in m
-            plot (bool, optional): _description_. Defaults to False.
+            plot (bool, optional): Plots the results. Defaults to False.
+            precision (str, optional): Does a "double" or a "single" application
+            of the propagator. This leads to a dz (single) or dz^3 (double) precision.
+            Defaults to "single".
         Returns:
             np.ndarray: Propagated field in proper units V/m
         """
@@ -142,25 +160,20 @@ class NLSE:
             A = np.empty((self.NX, self.NY), dtype=np.complex64)
             plan_fft = fftpack.get_fft_plan(
                 A, shape=A.shape, axes=(0, 1), value_type='C2C')
-
-            @cp.fuse(kernel_name="nl_prop")
-            def nl_prop(a: complex, b: float, c: complex):
-                return c*cp.exp(a + 1j*b*cp.abs(c)**2)
         else:
-            A = np.empty((self.NX, self.NY), dtype=np.complex64)
-            B = np.empty((self.NX, self.NY), dtype=np.complex64)
+            A = pyfftw.empty_aligned((self.NX, self.NY), dtype=np.complex64)
             # try to load previous fftw wisdom
             try:
                 with open("fft.wisdom", "rb") as file:
                     wisdom = pickle.load(file)
                     pyfftw.import_wisdom(wisdom)
             except FileNotFoundError:
-                print("No wisdom found, starting over ...")
-            plan_fft = pyfftw.FFTW(A, B, direction="FFTW_FORWARD",
+                print("No FFT wisdom found, starting over ...")
+            plan_fft = pyfftw.FFTW(A, A, direction="FFTW_FORWARD",
                                    flags=("FFTW_PATIENT",),
                                    threads=multiprocessing.cpu_count(),
                                    axes=(0, 1))
-            plan_ifft = pyfftw.FFTW(B, A, direction="FFTW_BACKWARD",
+            plan_ifft = pyfftw.FFTW(A, A, direction="FFTW_BACKWARD",
                                     flags=("FFTW_PATIENT",),
                                     threads=multiprocessing.cpu_count(),
                                     axes=(0, 1))
@@ -170,8 +183,12 @@ class NLSE:
         Ky = 2 * np.pi * np.fft.fftfreq(self.NY, d=self.delta_Y)
 
         Kxx, Kyy = np.meshgrid(Kx, Ky)
-        propagator = np.exp(-1j * 0.25 * (Kxx**2 + Kyy**2) /
-                            self.k * delta_Z)  # symetrized
+        if precision == "double":
+            propagator = np.exp(-1j * 0.25 * (Kxx**2 + Kyy**2) /
+                                self.k * delta_Z)  # symetrized
+        else:
+            propagator = np.exp(-1j * 0.5 * (Kxx**2 + Kyy**2) /
+                                self.k * delta_Z)
         if BACKEND == "GPU":
             propagator_cp = cp.asarray(propagator)
             self.V = cp.asarray(self.V)
@@ -183,12 +200,14 @@ class NLSE:
                 plan_fft.fft(A, A, cp.cuda.cufft.CUFFT_INVERSE)
                 # fft normalization
                 A /= np.prod(A.shape)
-                A = nl_prop((-self.alpha/2 + 1j*self.k*self.V/2)*delta_Z, self.k *
-                            self.n2*c*epsilon_0 * delta_Z, A)
-                plan_fft.fft(A, A, cp.cuda.cufft.CUFFT_FORWARD)
-                A *= propagator_cp  # linear step in Fourier domain (shifted)
-                plan_fft.fft(A, A, cp.cuda.cufft.CUFFT_INVERSE)
-                A /= np.prod(A.shape)
+                nl_prop(A, delta_Z, self.alpha, self.k/2 *
+                        self.V, self.k*self.n2*c*epsilon_0)
+                if precision == "double":
+                    plan_fft.fft(A, A, cp.cuda.cufft.CUFFT_FORWARD)
+                    # linear step in Fourier domain (shifted)
+                    A *= propagator_cp
+                    plan_fft.fft(A, A, cp.cuda.cufft.CUFFT_INVERSE)
+                    A /= np.prod(A.shape)
                 return A
             start_gpu = cp.cuda.Event()
             end_gpu = cp.cuda.Event()
@@ -211,16 +230,17 @@ class NLSE:
             print(
                 f"Time spent to solve : {t_gpu*1e-3} s (GPU) / {time.perf_counter()-t0} s (CPU)")
         else:
-            def split_step(A, B):
+            def split_step(A):
                 """computes one propagation step"""
                 plan_fft(A)
-                B *= propagator  # linear step in Fourier domain (shifted)
-                plan_ifft(B)
-                A *= np.exp(delta_Z*(-self.alpha/2 + 1j*self.k/2*self.V + 1j*self.k *
-                                     self.n2*c*epsilon_0*np.abs(A)**2))
-                plan_fft(A)
-                B *= propagator  # linear step in Fourier domain (shifted)
-                plan_ifft(B)
+                A *= propagator  # linear step in Fourier domain (shifted)
+                plan_ifft(A)
+                nl_prop(A, delta_Z, self.alpha, self.k/2 *
+                        self.V, self.k*self.n2*c*epsilon_0)
+                if precision == "double":
+                    plan_fft(A)
+                    A *= propagator  # linear step in Fourier domain (shifted)
+                    plan_ifft(A)
                 return A
             t0 = time.perf_counter()
             n2_old = self.n2
@@ -228,7 +248,7 @@ class NLSE:
                 if z > self.L:
                     self.n2 = 0
                 sys.stdout.write(f"\rIteration {i+1}/{len(Z)}")
-                A[:, :] = split_step(A, B)
+                A[:, :] = split_step(A)
             print(
                 f"\nTime spent to solve : {time.perf_counter()-t0} s (CPU)")
             with open("fft.wisdom", "wb") as file:
