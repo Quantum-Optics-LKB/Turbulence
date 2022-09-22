@@ -14,7 +14,6 @@ import cupy as cp
 import matplotlib.pyplot as plt
 import numba
 from numba import cuda
-import torch
 from scipy import spatial
 pyfftw.interfaces.cache.enable()
 
@@ -357,7 +356,7 @@ def vortex_detection_cp(phase: cp.ndarray, plot: bool = False) -> cp.ndarray:
     """
     velo = velocity_cp(phase)
     windings = cp.empty_like(velo[0])
-    tpb = 8
+    tpb = 16
     bpgx = math.ceil(windings.shape[0]/tpb)
     bpgy = math.ceil(windings.shape[1]/tpb)
     phase_sum_cp[(bpgx, bpgy), (tpb, tpb)](velo, windings)
@@ -380,62 +379,14 @@ def vortex_detection_cp(phase: cp.ndarray, plot: bool = False) -> cp.ndarray:
     return vortices
 
 
-@cuda.jit((numba.float32[:, :], numba.int64, numba.int64), fastmath=True)
-def fill_other_half(D: cp.ndarray, N0: int, N1: int):
-    """Fills the other half of a triangular matrix
-
-    Args:
-        D (cp.ndarray): Matrix to fill
-        N0 (int): Size along axis 0
-        N1 (int): Size along axis 1
-    """
-    i, j = cuda.grid(2)
-    if i < N0:
-        if j > i and j < N1:
-            D[j, i] = D[i, j]
-
-
-@cuda.jit((numba.float32[:, :], numba.float32[:, :]), fastmath=True)
-def get_distances_cp(vortices: cp.ndarray, D: cp.ndarray):
-    """Calculates the distance to all the other vortices and
-    returns the sorted list of neighbors
-
-    Args:
-        vortices (cp.ndarray): Array of vortices [[x, y, l], ...]
-        D (cp.ndarray): Array to store the distances.
-    Returns:
-        None
-    """
-    i, j = cuda.grid(2)
-    if i < D.shape[0]:
-        if j > i and j < D.shape[1]:
-            D[i, j] = (vortices[i, 0]-vortices[j, 0]) * \
-                (vortices[i, 0]-vortices[j, 0])
-            D[i, j] += (vortices[i, 1]-vortices[j, 1]) * \
-                (vortices[i, 1]-vortices[j, 1])
-
-
-def rank_neighbors_cp(vortices: cp.ndarray, distances: cp.ndarray) -> cp.ndarray:
-    """Returns the ranking from the vortices
-
-    Args:
-        vortices (cp.ndarray): vortices
-        distances (cp.ndarray): to stock distances
-
-    Returns:
-        cp.ndarray: ranking
-    """
-    # distances[:, :] = spatial_cp.distance.distance_matrix(
-    #     vortices[:, 0], vortices[:, 1])
-    tpb = 8
-    bpgx = math.ceil(distances.shape[0]/tpb)
-    bpgy = math.ceil(distances.shape[1]/tpb)
-    get_distances_cp[(bpgx, bpgy), (tpb, tpb)](vortices, distances)
-    fill_other_half[(bpgx, bpgy), (tpb, tpb)](
-        distances, distances.shape[0], distances.shape[1])
-    ranking = cp.asarray(torch.argsort(
-        torch.as_tensor(distances, device='cuda'), axis=1))
-    return ranking
+def join_clusters(clusters):
+    result = clusters[:1]  # 1
+    for cluster in clusters[1:]:
+        if cluster[0] == result[-1][-1]:
+            result[-1] = result[-1] + cluster[1:]  # 2
+        else:
+            result.append(cluster)  # 3
+    return result
 
 
 @numba.njit(numba.bool_[:](numba.int64[:]), cache=True, fastmath=True)
@@ -470,54 +421,24 @@ def build_pairs(vortices: np.ndarray, nn: np.ndarray, mutu: np.ndarray, queue: n
         dipoles, pairs, queue : np.ndarray dipoles, clusters and updated queue
     """
     closest = nn[mutu]
-    ll = vortices[mutu, 2]*vortices[closest, 2]
-    dipoles_ = mutu[ll == -1]
-    pairs_ = mutu[ll == 1]
+    ll = vortices[:, 2]*vortices[nn, 2]
+    # form proto_clusters
+    clusters = np.empty((len(queue[ll == 1]), 2), dtype=np.int64)
+    clusters[:, 0] = queue[ll == 1]
+    clusters[:, 1] = nn[ll == 1]
+    clusters = join_clusters(clusters.tolist())
+    # remove them from queue
+    queue[ll == 1] = -1
+    dipoles_ = mutu[ll[mutu] == -1]
     dipoles = np.empty((len(dipoles_), 2), dtype=np.int64)
-    pairs = np.empty((len(pairs_), 2), dtype=np.int64)
     dipoles[:, 0] = dipoles_
-    dipoles[:, 1] = closest[ll == -1]
-    pairs[:, 0] = pairs_
-    pairs[:, 1] = closest[ll == 1]
+    dipoles[:, 1] = closest[ll[mutu] == -1]
     # remove them from queue
-    queue[pairs[:, 0]] = -1
-    queue[pairs[:, 1]] = -1
     queue[dipoles[:, 0]] = -1
     queue[dipoles[:, 1]] = -1
     # update queue
     queue = queue[queue >= 0]
-    return dipoles, pairs, queue
-
-
-def build_pairs_cp(vortices: np.ndarray, ranking: np.ndarray, mutu: np.ndarray, queue: np.ndarray):
-    """Builds the dipoles and the pairs of same sign
-
-    Args:
-        vortices (np.ndarray): Vortices
-        ranking (np.ndarray): Ranking matrix
-        queue (np.ndarray): Vortices still under consideration
-        mutu (np.ndarray): Mutual nearest neighbors
-    Returns:
-        dipoles, pairs, queue : np.ndarray dipoles, clusters and updated queue
-    """
-    closest = ranking[mutu, 1]
-    ll = vortices[mutu, 2]*vortices[closest, 2]
-    dipoles_ = mutu[ll == -1]
-    pairs_ = mutu[ll == 1]
-    dipoles = cp.empty((len(dipoles_), 2), dtype=np.int64)
-    pairs = cp.empty((len(pairs_), 2), dtype=np.int64)
-    dipoles[:, 0] = dipoles_
-    dipoles[:, 1] = closest[ll == -1]
-    pairs[:, 0] = pairs_
-    pairs[:, 1] = closest[ll == 1]
-    # remove them from queue
-    queue[pairs[:, 0]] = -1
-    queue[pairs[:, 1]] = -1
-    queue[dipoles[:, 0]] = -1
-    queue[dipoles[:, 1]] = -1
-    # update queue
-    queue = queue[queue >= 0]
-    return dipoles, pairs, queue
+    return dipoles, clusters, queue
 
 
 def clustering(vortices: np.ndarray, nn: np.ndarray, queue: np.ndarray,
@@ -589,10 +510,11 @@ def cluster_vortices(vortices: np.ndarray) -> list:
     mutu = mutual_nearest_neighbors(nn)
     mutu = queue[mutu]
     # RULE 1
-    dipoles, pairs, queue = build_pairs(vortices, nn, mutu, queue)
-    assert len(queue) + 2*dipoles.shape[0] + 2*pairs.shape[0] == len(
-        vortices), "Something went wrong, the vortices numbers don't add up"
-    clusters = pairs.tolist()
+    dipoles, clusters, queue = build_pairs(vortices, nn, mutu, queue)
+    # clusters = pairs.tolist()
+    # assert len(queue) + 2*dipoles.shape[0] + 2*pairs.shape[0] == len(
+    #    vortices), "Something went wrong, the vortices numbers don't add up"
+    # clusters = pairs.tolist()
     # the j dimension limits the maximum cluster size
     # clusters = -np.ones((pairs.shape[0]+queue.shape[0], 10), dtype=np.int64)
     # clusters[0:pairs.shape[0], 0:2] = pairs
@@ -612,91 +534,47 @@ def cluster_vortices(vortices: np.ndarray) -> list:
     return dipoles, clusters, singles
 
 
-def cluster_vortices_cp(vortices: np.ndarray) -> list:
-    """Clusters the vortices into dipoles, clusters and single vortices
-
-    Args:
-        vortices (np.ndarray): Array of vortices [[x, y, l], ...]
-
-    Returns:
-        list: dipoles, clusters, singles
-    """
-    queue = np.arange(0, vortices.shape[0], 1, dtype=np.int64)
-    singles = []
-    dipoles = []
-    clusters = []
-    # compute mutual NN with ranking
-    distances = cp.zeros(
-        (vortices.shape[0], vortices.shape[0]), dtype=np.float32)
-    ranking = rank_neighbors_cp(vortices, distances)
-    ranking = ranking.get()
-    vortices = vortices.get()
-    mutu = mutual_nearest_neighbors(ranking)
-    mutu = queue[mutu]
-    # RULE 1
-    dipoles, pairs, queue = build_pairs(vortices, ranking, mutu, queue)
-    assert len(queue) + 2*dipoles.shape[0] + 2*pairs.shape[0] == len(
-        vortices), "Something went wrong, the vortices numbers don't add up"
-    clusters = pairs.tolist()
-    # RULE 2
-    clustering(
-        vortices, ranking, queue, dipoles, clusters)
-    # because we initialize the clusters with the singleton [q], we have a lot of clusters that are [q, q, r]
-    # so we filter
-    true_clusters = []
-    singles = []
-    for cluster in clusters:
-        if len(cluster) == 1:
-            singles.append(cluster[0])
-        else:
-            true_clusters.append(cluster)
-    clusters = true_clusters
-    return dipoles, clusters, singles
-
-
 def main():
     phase = np.load("v500_1_phase.npy")
     phase = phase.astype(np.float32)
-    # phase_cp = cp.asarray(phase)
+    phase_cp = cp.asarray(phase)
     # Vortex detection step
-    # vortices_cp = vortex_detection_cp(phase_cp, plot=False)
+    vortices_cp = vortex_detection_cp(phase_cp, plot=False)
     vortices = vortex_detection(phase, plot=False)
-    # timer_repeat(vortex_detection, phase, N_repeat=25)
-    # timer_repeat(vortex_detection_cp, phase_cp, N_repeat=25)
+    timer_repeat(vortex_detection, phase, N_repeat=25)
+    timer_repeat(vortex_detection_cp, phase_cp, N_repeat=25)
     # Velocity decomposition in incompressible and compressible
     velo, v_inc, v_comp = helmholtz_decomp(phase, plot=False)
     # Clustering benchmarks
-    # dipoles, clusters, singles = cluster_vortices_cp(vortices_cp)
     dipoles, clusters, singles = cluster_vortices(vortices)
-    timer_repeat(cluster_vortices, vortices, N_repeat=25)
-    # timer_repeat_cp(cluster_vortices_cp, vortices_cp, N_repeat=25)
+    timer_repeat(cluster_vortices, vortices, N_repeat=100)
     # Plot results
-    # fig, ax = plt.subplots()
-    # flow = np.hypot(v_inc[0], v_inc[1])
-    # YY, XX = np.indices(flow.shape)
-    # im = ax.imshow(flow, vmax=0.5, cmap='viridis')
-    # ax.streamplot(XX, YY, v_inc[0], v_inc[1],
-    #               density=5, color='white', linewidth=1)
-    # for dip in range(dipoles.shape[0]):
-    #     ax.plot(vortices[dipoles[dip, :], 0],
-    #             vortices[dipoles[dip, :], 1], color='g', marker='o')
-    # for sing in singles:
-    #     ax.scatter(vortices[sing, 0], vortices[sing, 1],
-    #                c=vortices[sing, 2], cmap='bwr', vmin=-1, vmax=1)
-    # for cluster in clusters:
-    #     if vortices[cluster[0], 2] == 1:
-    #         c = 'r'
-    #     else:
-    #         c = 'b'
-    #     ax.plot(vortices[cluster, 0], vortices[cluster,
-    #                                            1], marker='o', color=c)
-    # ax.set_title(r'$v^{flow}$')
-    # ax.set_xlabel('x')
-    # ax.set_ylabel('y')
-    # ax.set_ylim(0, 2047)
-    # ax.set_ylim(0, 2047)
-    # plt.colorbar(im, ax=ax)
-    # plt.show()
+    fig, ax = plt.subplots()
+    flow = np.hypot(v_inc[0], v_inc[1])
+    YY, XX = np.indices(flow.shape)
+    im = ax.imshow(flow, vmax=0.5, cmap='viridis')
+    ax.streamplot(XX, YY, v_inc[0], v_inc[1],
+                  density=5, color='white', linewidth=1)
+    for dip in range(dipoles.shape[0]):
+        ax.plot(vortices[dipoles[dip, :], 0],
+                vortices[dipoles[dip, :], 1], color='g', marker='o')
+    for sing in singles:
+        ax.scatter(vortices[sing, 0], vortices[sing, 1],
+                   c=vortices[sing, 2], cmap='bwr', vmin=-1, vmax=1)
+    for cluster in clusters:
+        if vortices[cluster[0], 2] == 1:
+            c = 'r'
+        else:
+            c = 'b'
+        ax.plot(vortices[cluster, 0], vortices[cluster,
+                                               1], marker='o', color=c)
+    ax.set_title(r'$v^{flow}$')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_ylim(0, 2047)
+    ax.set_ylim(0, 2047)
+    plt.colorbar(im, ax=ax)
+    plt.show()
 
 
 if __name__ == "__main__":
