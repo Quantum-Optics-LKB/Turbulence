@@ -15,7 +15,6 @@ import pyfftw
 import pickle
 import cupy as cp
 import networkx as nx
-# from cupyx.scipy import spatial as spatial_cp
 pyfftw.interfaces.cache.enable()
 
 # simple timing decorator
@@ -23,7 +22,7 @@ pyfftw.interfaces.cache.enable()
 
 def timer(func):
     """This function shows the execution time of
-    the function object passed"""
+    the function object passed. To use as decorator"""
     def wrap_func(*args, **kwargs):
         t1 = time.perf_counter()
         result = func(*args, **kwargs)
@@ -54,7 +53,7 @@ def timer_repeat_cp(func, *args, N_repeat=1000):
         end_gpu.record()
         end_gpu.synchronize()
         t[i] = cp.cuda.get_elapsed_time(start_gpu, end_gpu)
-    print(f"{N_repeat} executions of {func.__name__!r} {np.mean(t)*1e3:.3f} +/- {np.std(t)*1e3:.3f} ms per loop (min : {np.min(t)*1e3:.3f} / max : {np.max(t)*1e3:.3f} ms / med: {np.median(t)*1e3:.3f})")
+    print(f"{N_repeat} executions of {func.__name__!r} {np.mean(t):.3f} +/- {np.std(t):.3f} ms per loop (min : {np.min(t):.3f} / max : {np.max(t):.3f} ms / med: {np.median(t):.3f})")
     return np.mean(t), np.std(t)
 
 
@@ -154,7 +153,7 @@ def velocity_cp(phase: np.ndarray, dx: float = 1) -> np.ndarray:
     return velo
 
 
-def helmholtz_decomp(phase: np.ndarray, plot=True, dx: float = 1) -> tuple:
+def helmholtz_decomp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
     """Decomposes a phase picture into compressible and incompressible velocities
 
     Args:
@@ -205,14 +204,14 @@ def helmholtz_decomp(phase: np.ndarray, plot=True, dx: float = 1) -> tuple:
 
         plt.figure(2, [12, 9])
         plt.imshow(flow, vmax=1)
-        plt.title(r'$|v^{inc}_{math}|$')
+        plt.title(r'$|v^{inc}|$')
         plt.xlabel('x')
         plt.ylabel('y')
         plt.colorbar()
 
         plt.figure(3, [12, 9])
         plt.imshow(np.hypot(v_comp[0], v_comp[1]), vmax=1)
-        plt.title(r'$|v^{comp}_{math}|$')
+        plt.title(r'$|v^{comp}|$')
         plt.xlabel('x')
         plt.ylabel('y')
         plt.colorbar()
@@ -222,16 +221,16 @@ def helmholtz_decomp(phase: np.ndarray, plot=True, dx: float = 1) -> tuple:
         plt.imshow(flow, vmax=0.5, cmap='viridis')
         plt.streamplot(XX, YY, v_inc[0], v_inc[1],
                        density=5, color='white', linewidth=1)
-        plt.title(r'$v^{flow}$')
+        plt.title(r'$v^{inc}$')
         plt.xlabel('x')
         plt.ylabel('y')
-        plt.colorbar()
+        plt.colorbar(label=r'$|v^{inc}|$')
         plt.show()
 
     return velo, v_inc, v_comp
 
 
-def helmholtz_decomp_cp(phase: np.ndarray, plot=True, dx: float = 1) -> tuple:
+def helmholtz_decomp_cp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
     """Decomposes a phase picture into compressible and incompressible velocities
 
     Args:
@@ -267,14 +266,14 @@ def helmholtz_decomp_cp(phase: np.ndarray, plot=True, dx: float = 1) -> tuple:
 
         plt.figure(2, [12, 9])
         plt.imshow(cp.asnumpy(flow), vmax=1)
-        plt.title(r'$|v^{inc}_{math}|$')
+        plt.title(r'$|v^{inc}|$')
         plt.xlabel('x')
         plt.ylabel('y')
         plt.colorbar()
 
         plt.figure(3, [12, 9])
         plt.imshow(cp.asnumpy(cp.hypot(v_comp[0], v_comp[1])), vmax=1)
-        plt.title(r'$|v^{comp}_{math}|$')
+        plt.title(r'$|v^{comp}|$')
         plt.xlabel('x')
         plt.ylabel('y')
         plt.colorbar()
@@ -284,10 +283,10 @@ def helmholtz_decomp_cp(phase: np.ndarray, plot=True, dx: float = 1) -> tuple:
         plt.imshow(cp.asnumpy(flow), vmax=0.5, cmap='viridis')
         plt.streamplot(XX, YY, cp.asnumpy(v_inc[0]), cp.asnumpy(v_inc[1]),
                        density=5, color='white', linewidth=1)
-        plt.title(r'$v^{flow}$')
+        plt.title(r'$v^{inc}$')
         plt.xlabel('x')
         plt.ylabel('y')
-        plt.colorbar()
+        plt.colorbar(label=r'$|v^{inc}|$')
         plt.show()
 
     return velo, v_inc, v_comp
@@ -320,7 +319,8 @@ def vortex_detection(phase: np.ndarray, plot: bool = False) -> np.ndarray:
         im = plt.imshow(phase, cmap='twilight_shifted')
         ax.scatter(vortices[:, 0], vortices[:, 1],
                    c=vortices[:, 2], cmap='bwr')
-        fig.colorbar(im, ax=ax, label="Phase")
+        fig.colorbar(im, ax=ax, label="Vorticity")
+        plt.title("Phase")
         plt.show()
     return vortices
 
@@ -352,10 +352,11 @@ def vortex_detection_cp(phase: cp.ndarray, plot: bool = False) -> cp.ndarray:
     vortices[len(plus_x):, 2] = -1
     if plot:
         plt.figure(1, figsize=[12, 9])
-        plt.imshow(cp.hypot(velo[0], velo[1]).get(), vmin=0, vmax=1)
+        plt.imshow(phase.get(), cmap='twilight_shifted')
         plt.scatter(vortices[:, 0].get(), vortices[:, 1].get(),
                     c=vortices[:, 2].get(), cmap='bwr')
         plt.colorbar(label="Vorticity")
+        plt.title("Phase")
         plt.show()
     return vortices
 
@@ -480,41 +481,49 @@ def cluster_vortices(vortices: np.ndarray) -> list:
 
 
 def main():
-    phase = np.loadtxt("v500_1_phase.txt")
+    phase = np.loadtxt("v500_1_phase.gz")
     phase_cp = cp.asarray(phase)
     # Vortex detection step
-    vortices_cp = vortex_detection_cp(phase_cp, plot=False)
+    vortices_cp = vortex_detection_cp(phase_cp, plot=True)
     vortices = vortex_detection(phase, plot=False)
     timer_repeat(vortex_detection, phase, N_repeat=25)
     timer_repeat(vortex_detection_cp, phase_cp, N_repeat=25)
     # Velocity decomposition in incompressible and compressible
-    velo, v_inc, v_comp = helmholtz_decomp(phase, plot=False)
+    velo, v_inc, v_comp = helmholtz_decomp_cp(phase_cp, plot=False)
+    velo, v_inc, v_comp = helmholtz_decomp(phase, plot=True)
+    timer_repeat(helmholtz_decomp, phase, N_repeat=25)
+    timer_repeat_cp(helmholtz_decomp_cp, phase_cp, N_repeat=25)
     # Clustering benchmarks
     dipoles, clusters = cluster_vortices(vortices)
     timer_repeat(cluster_vortices, vortices, N_repeat=100)
     # Plot results
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=[12, 9])
     YY, XX = np.indices(v_inc[0].shape)
     im = ax.imshow(np.hypot(v_inc[0], v_inc[1]), cmap='viridis')
     ax.streamplot(XX, YY, v_inc[0], v_inc[1],
                   density=5, color='white', linewidth=1)
     for dip in range(dipoles.shape[0]):
-        ax.plot(vortices[dipoles[dip, :], 0],
-                vortices[dipoles[dip, :], 1], color='g', marker='o')
+        ln_dip, = ax.plot(vortices[dipoles[dip, :], 0],
+                          vortices[dipoles[dip, :], 1], color='g', marker='o', label='Dipoles')
     for cluster in clusters:
         cluster = list(cluster)
         if vortices[cluster[0], 2] == 1:
             c = 'r'
+            lab = 'Plus'
+            ln_plus, = ax.plot(vortices[cluster, 0], vortices[cluster,
+                                                              1], marker='o', color=c, label=lab)
         else:
             c = 'b'
-        ax.plot(vortices[cluster, 0], vortices[cluster,
-                                               1], marker='o', color=c)
-    ax.set_title(r'Incompressible velocity $|v^{inc}|$')
+            lab = 'Minus'
+            ln_minus, = ax.plot(vortices[cluster, 0], vortices[cluster,
+                                                               1], marker='o', color=c, label=lab)
+    ax.set_title(r'Incompressible velocity $v^{inc}$')
     ax.set_xlabel('x')
     ax.set_ylabel('y')
     ax.set_ylim(0, phase.shape[1])
     ax.set_ylim(0, phase.shape[0])
-    plt.colorbar(im, ax=ax)
+    plt.colorbar(im, ax=ax, label=r'$|v^{inc}|$')
+    ax.legend(handles=[ln_dip, ln_plus, ln_minus])
     plt.show()
 
 
