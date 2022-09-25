@@ -15,7 +15,6 @@ import pyfftw
 import pickle
 import cupy as cp
 import networkx as nx
-import multiprocessing
 # from cupyx.scipy import spatial as spatial_cp
 pyfftw.interfaces.cache.enable()
 
@@ -59,22 +58,8 @@ def timer_repeat_cp(func, *args, N_repeat=1000):
     return np.mean(t), np.std(t)
 
 
-@numba.njit(numba.float32[:, :](numba.float32[:, :], numba.int64), fastmath=True, cache=True, parallel=True)
-def phase_jumps(phase, axis):
-    dphi = np.zeros(phase.shape, dtype=np.float32)
-    if axis == 0:
-        for i in numba.prange(1, phase.shape[0]):
-            for j in range(phase.shape[1]):
-                dphi[i, j] = phase[i, j] - phase[(i-1) % phase.shape[0], j]
-    elif axis == 1:
-        for i in numba.prange(phase.shape[0]):
-            for j in range(1, phase.shape[1]):
-                dphi[i, j] = phase[i, j] - phase[i, (j-1) % phase.shape[1]]
-    return dphi
-
-
-@numba.njit(numba.float32[:, :](numba.float32[:, :, :]), fastmath=True, cache=True, parallel=True)
-def phase_sum(velo):
+@numba.stencil()
+def phase_sum_stencil(grad0, grad1):
     """Computes the phase gradient winding
 
     Args:
@@ -83,20 +68,22 @@ def phase_sum(velo):
     Returns:
         np.ndarray: The winding array.
     """
+    cont = grad0[0, 0]
+    cont += grad0[0, 1]
+    cont -= grad0[1, 1]
+    cont -= grad0[1, 0]
+    cont -= grad1[0, 0]
+    cont += grad1[0, 1]
+    cont += grad1[1, 1]
+    cont -= grad1[1, 0]
+    return cont
+
+
+@numba.njit(numba.float32[:, :](numba.float32[:, :, :]), fastmath=True, cache=True, parallel=True)
+def phase_sum(velo: np.ndarray):
     grad0 = velo[0]
     grad1 = velo[1]
-    cont = np.empty(grad0.shape, dtype=np.float32)
-    for i in numba.prange(cont.shape[0]):
-        for j in range(cont.shape[1]):
-            cont[i, j] = grad0[i % cont.shape[0], j % cont.shape[1]]
-            cont[i, j] += grad0[i % cont.shape[0], (j+1) % cont.shape[1]]
-            cont[i, j] -= grad0[(i+1) % cont.shape[0], (j+1) % cont.shape[1]]
-            cont[i, j] -= grad0[(i+1) % cont.shape[0], j % cont.shape[1]]
-            cont[i, j] -= grad1[i % cont.shape[0], j % cont.shape[1]]
-            cont[i, j] += grad1[i % cont.shape[0], (j + 1) % cont.shape[1]]
-            cont[i, j] += grad1[(i+1) % cont.shape[0], (j+1) % cont.shape[1]]
-            cont[i, j] -= grad1[(i+1) % cont.shape[0], j % cont.shape[1]]
-    return cont
+    return phase_sum_stencil(grad0, grad1)
 
 
 @cuda.jit((numba.float32[:, :, :], numba.float32[:, :]), fastmath=True)
@@ -426,31 +413,33 @@ def build_pairs(vortices: np.ndarray, nn: np.ndarray, mutu: np.ndarray, queue: n
 
 
 def clustering(vortices: np.ndarray, nn: np.ndarray, queue: np.ndarray,
-               dipoles: np.ndarray, cluster_tree: nx.Graph) -> list:
+               dipoles: np.ndarray, cluster_graph: nx.Graph):
     """Sorts the vortices into clusters after the dipoles have been removed
 
     Args:
         vortices (np.ndarray): Vortices
-        ranking (np.ndarray): Vortices ranking matrix
+        nn (np.ndarray): Nearest neighbors
         queue (np.ndarray): Vortices to sort
-        dipoles (list): List of dipoles
-        cluster_tree (nx.Graph): List of clusters in graph form
+        dipoles (np.ndarray): List of dipoles
+        cluster_graph (nx.Graph): List of clusters in graph form
 
     Returns:
         None
     """
-    def check_vortex(q):
-        closest = nn[q]
-        sgn = vortices[q, 2]
-        sgn_closest = vortices[closest, 2]
-        # if it's a different sign, we don't consider it
-        if sgn_closest == sgn:
-            # we check it's not a dipole
-            is_in_dipoles = np.any(dipoles == closest)
-            # if it's not, we connect them
-            if not (is_in_dipoles):
-                cluster_tree.add_edge(q, closest)
-    map(check_vortex, queue)
+    closest = nn[queue]
+    sgn = vortices[queue, 2]
+    sgn_closest = vortices[closest, 2]
+    # check that the neighbor has the same sign
+    establish_connection = np.equal(sgn, sgn_closest)
+    # check that it is not in a dipole
+    establish_connection = np.logical_and(
+        establish_connection, np.logical_not(np.isin(closest, dipoles)))
+    # instantiate array of edges to add
+    edges_to_add = np.zeros((np.sum(establish_connection), 2), dtype=np.int64)
+    edges_to_add[:, 0] = queue[establish_connection]
+    edges_to_add[:, 1] = nn[queue[establish_connection]]
+    # add the edges to the graph of clusters
+    cluster_graph.add_edges_from(edges_to_add)
 
 
 def cluster_vortices(vortices: np.ndarray) -> list:
@@ -460,7 +449,8 @@ def cluster_vortices(vortices: np.ndarray) -> list:
         vortices (np.ndarray): Array of vortices [[x, y, l], ...]
 
     Returns:
-        list: dipoles, clusters, singles
+        list: dipoles, clusters. Clusters are a Networkx connected_components object (i.e a list of sets). 
+        It needs to be converted to list of lists for plotting. 
     """
     queue = np.arange(0, vortices.shape[0], 1, dtype=np.int64)
     # store vortices in tree
@@ -472,37 +462,26 @@ def cluster_vortices(vortices: np.ndarray) -> list:
     mutu = mutual_nearest_neighbors(nn)
     mutu = queue[mutu]
     # RULE 1
-    # instantiate graph for representation
     dipoles, pairs, queue = build_pairs(
         vortices, nn, mutu, queue)
     assert 2*len(dipoles) + 2*pairs.shape[0] + \
         len(queue) == vortices.shape[0], "PROBLEM count"
-    # build graph
+    # build graph to represent clusters
     cluster_graph = nx.Graph()
-    for c in range(pairs.shape[0]):
-        cluster_graph.add_node(pairs[c, 0], pos=vortices[pairs[c, 0], 0:2])
-        cluster_graph.add_node(pairs[c, 1], pos=vortices[pairs[c, 1], 0:2])
-        cluster_graph.add_edge(pairs[c, 0], pairs[c, 1])
-    for q in queue:
-        cluster_graph.add_node(q, pos=vortices[q, 0:2])
+    cluster_graph.add_nodes_from(pairs[:, 0], pos=vortices[pairs[:, 0], 0:2])
+    cluster_graph.add_nodes_from(pairs[:, 1], pos=vortices[pairs[:, 1], 0:2])
+    cluster_graph.add_edges_from(pairs.tolist())
+    cluster_graph.add_nodes_from(queue, pos=vortices[queue, 0:2])
     # RULE 2
     clustering(
         vortices, nn, queue, dipoles, cluster_graph)
-    connected = nx.connected_components(cluster_graph)
-    clusters = []
-    singles = []
-    for c in connected:
-        if len(list(c)) == 1:
-            singles.append(list(c)[0])
-        else:
-            clusters.append(list(c))
-    return dipoles, clusters, singles
+    clusters = nx.connected_components(cluster_graph)
+    return dipoles, clusters
 
 
 def main():
-    phase = np.load("v500_1_phase.npy")
+    phase = np.loadtxt("v500_1_phase.txt")
     phase_cp = cp.asarray(phase)
-    timer_repeat_cp(cp.asnumpy, phase_cp, N_repeat=25)
     # Vortex detection step
     vortices_cp = vortex_detection_cp(phase_cp, plot=False)
     vortices = vortex_detection(phase, plot=False)
@@ -511,29 +490,26 @@ def main():
     # Velocity decomposition in incompressible and compressible
     velo, v_inc, v_comp = helmholtz_decomp(phase, plot=False)
     # Clustering benchmarks
-    dipoles, clusters, singles = cluster_vortices(vortices)
+    dipoles, clusters = cluster_vortices(vortices)
     timer_repeat(cluster_vortices, vortices, N_repeat=100)
     # Plot results
-    flow = np.hypot(v_inc[O], v_inc[1])
     fig, ax = plt.subplots()
-    YY, XX = np.indices(flow.shape)
-    im = ax.imshow(flow)
+    YY, XX = np.indices(v_inc[0].shape)
+    im = ax.imshow(np.hypot(v_inc[0], v_inc[1]), cmap='viridis')
     ax.streamplot(XX, YY, v_inc[0], v_inc[1],
-                  density = 5, color = 'white', linewidth = 1)
+                  density=5, color='white', linewidth=1)
     for dip in range(dipoles.shape[0]):
         ax.plot(vortices[dipoles[dip, :], 0],
                 vortices[dipoles[dip, :], 1], color='g', marker='o')
-    for sing in singles:
-        ax.scatter(vortices[sing, 0], vortices[sing, 1],
-                   c=vortices[sing, 2], cmap='bwr', vmin=-1, vmax=1)
     for cluster in clusters:
+        cluster = list(cluster)
         if vortices[cluster[0], 2] == 1:
             c = 'r'
         else:
             c = 'b'
         ax.plot(vortices[cluster, 0], vortices[cluster,
                                                1], marker='o', color=c)
-    ax.set_title(r'$|v^{inc}|$')
+    ax.set_title(r'Incompressible velocity $|v^{inc}|$')
     ax.set_xlabel('x')
     ax.set_ylabel('y')
     ax.set_ylim(0, phase.shape[1])
