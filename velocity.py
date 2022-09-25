@@ -500,30 +500,26 @@ def cluster_vortices(vortices: np.ndarray) -> list:
 
 
 def main():
-    # from PIL import Image
-    # from contrast import phase_fast_cp
-    # im = np.asarray(Image.open("v500_1.tif"), dtype=np.float32)
-    # im_cp = cp.asarray(im)
     phase = np.load("v500_1_phase.npy")
-    # phase_cp = cp.asarray(phase)
-    # timer_repeat_cp(phase_fast_cp, im_cp, N_repeat=25)
-    # timer_repeat_cp(cp.asnumpy, phase_cp, N_repeat=25)
+    phase_cp = cp.asarray(phase)
+    timer_repeat_cp(cp.asnumpy, phase_cp, N_repeat=25)
     # Vortex detection step
-    # vortices_cp = vortex_detection_cp(phase_cp, plot=False)
+    vortices_cp = vortex_detection_cp(phase_cp, plot=False)
     vortices = vortex_detection(phase, plot=False)
-    # timer_repeat(vortex_detection, phase, N_repeat=25)
-    # timer_repeat(vortex_detection_cp, phase_cp, N_repeat=25)
+    timer_repeat(vortex_detection, phase, N_repeat=25)
+    timer_repeat(vortex_detection_cp, phase_cp, N_repeat=25)
     # Velocity decomposition in incompressible and compressible
-    # velo, v_inc, v_comp = helmholtz_decomp(phase, plot=False)
+    velo, v_inc, v_comp = helmholtz_decomp(phase, plot=False)
     # Clustering benchmarks
     dipoles, clusters, singles = cluster_vortices(vortices)
     timer_repeat(cluster_vortices, vortices, N_repeat=100)
     # Plot results
+    flow = np.hypot(v_inc[O], v_inc[1])
     fig, ax = plt.subplots()
-    # YY, XX = np.indices(flow.shape)
-    im = ax.imshow(phase, cmap='twilight_shifted')
-    # ax.streamplot(XX, YY, v_inc[0], v_inc[1],
-    #               density = 5, color = 'white', linewidth = 1)
+    YY, XX = np.indices(flow.shape)
+    im = ax.imshow(flow)
+    ax.streamplot(XX, YY, v_inc[0], v_inc[1],
+                  density = 5, color = 'white', linewidth = 1)
     for dip in range(dipoles.shape[0]):
         ax.plot(vortices[dipoles[dip, :], 0],
                 vortices[dipoles[dip, :], 1], color='g', marker='o')
@@ -537,8 +533,7 @@ def main():
             c = 'b'
         ax.plot(vortices[cluster, 0], vortices[cluster,
                                                1], marker='o', color=c)
-    # ax.set_title(r'$v^{flow}$')
-    ax.set_title("$\phi$")
+    ax.set_title(r'$|v^{inc}|$')
     ax.set_xlabel('x')
     ax.set_ylabel('y')
     ax.set_ylim(0, phase.shape[1])
