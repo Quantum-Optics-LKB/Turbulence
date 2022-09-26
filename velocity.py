@@ -55,7 +55,7 @@ def timer_repeat_cp(func, *args, N_repeat=1000):
         end_gpu.record()
         end_gpu.synchronize()
         t[i] = cp.cuda.get_elapsed_time(start_gpu, end_gpu)
-    print(f"{N_repeat} executions of {func.__name__!r} {np.mean(t)*1e3:.3f} +/- {np.std(t)*1e3:.3f} ms per loop (min : {np.min(t)*1e3:.3f} / max : {np.max(t)*1e3:.3f} ms / med: {np.median(t)*1e3:.3f})")
+    print(f"{N_repeat} executions of {func.__name__!r} {np.mean(t):.3f} +/- {np.std(t):.3f} ms per loop (min : {np.min(t):.3f} / max : {np.max(t):.3f} ms / med: {np.median(t):.3f})")
     return np.mean(t), np.std(t)
 
 
@@ -197,36 +197,33 @@ def helmholtz_decomp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
     if plot == True:
         flow = np.hypot(v_inc[0], v_inc[1])
         YY, XX = np.indices(flow.shape)
-        plt.figure(1, [12, 9])
-        plt.imshow(v_tot, vmax=1)
-        plt.title(r'$|v^{tot}|$')
-        plt.xlabel('x')
-        plt.ylabel('y')
-        plt.colorbar()
+        fig, ax = plt.subplots(2, 2, figsize=[12, 9])
+        im0 = ax[0].imshow(v_tot, vmax=1)
+        ax[0, 0].set_title(r'$|v^{tot}|$')
+        ax[0, 0].set_xlabel('x')
+        ax[0, 0].set_ylabel('y')
+        fig.colorbar(im0, ax=ax[0, 0])
 
-        plt.figure(2, [12, 9])
-        plt.imshow(flow, vmax=1)
-        plt.title(r'$|v^{inc}|$')
-        plt.xlabel('x')
-        plt.ylabel('y')
-        plt.colorbar()
+        im1 = ax[0, 1].imshow(flow, vmax=1)
+        ax[0, 1].set_title(r'$|v^{inc}|$')
+        ax[0, 1].set_xlabel('x')
+        ax[0, 1].set_ylabel('y')
+        fig.colorbar(im1, ax=ax[0, 1])
 
-        plt.figure(3, [12, 9])
-        plt.imshow(np.hypot(v_comp[0], v_comp[1]), vmax=1)
-        plt.title(r'$|v^{comp}|$')
-        plt.xlabel('x')
-        plt.ylabel('y')
-        plt.colorbar()
+        im2 = ax[1, 0].imshow(np.hypot(v_comp[0], v_comp[1]), vmax=1)
+        ax[1, 0].set_title(r'$|v^{comp}|$')
+        ax[1, 0].set_xlabel('x')
+        ax[1, 0].set_ylabel('y')
+        fig.colorbar(im2, ax=ax[1, 0])
 
         # flows are calculated by streamplot
-        plt.figure(4, [12, 9])
-        plt.imshow(flow, vmax=0.5, cmap='viridis')
-        plt.streamplot(XX, YY, v_inc[0], v_inc[1],
-                       density=5, color='white', linewidth=1)
-        plt.title(r'$v^{inc}$')
-        plt.xlabel('x')
-        plt.ylabel('y')
-        plt.colorbar(label=r'$|v^{inc}|$')
+        im3 = ax[1, 1].imshow(flow, vmax=0.5, cmap='viridis')
+        ax[1, 1].streamplot(XX, YY, v_inc[0], v_inc[1],
+                            density=5, color='white', linewidth=1)
+        ax[1, 1].set_title(r'$v^{inc}$')
+        ax[1, 1].set_xlabel('x')
+        ax[1, 1].set_ylabel('y')
+        fig.colorbar(im3, ax=ax[1, 1], label=r'$|v^{inc}|$')
         plt.show()
 
     return velo, v_inc, v_comp
@@ -259,38 +256,34 @@ def helmholtz_decomp_cp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
     if plot == True:
         flow = cp.hypot(v_inc[0], v_inc[1])
         YY, XX = np.indices(flow.shape)
-        plt.figure(1, [12, 9])
-        plt.imshow(cp.asnumpy(v_tot), vmax=1)
-        plt.title(r'$|v^{tot}|$')
-        plt.xlabel('x')
-        plt.ylabel('y')
-        plt.colorbar()
+        fig, ax = plt.subplots(2, 2, figsize=[12, 9])
+        im0 = ax[0, 0].imshow(v_tot.get(), vmax=1)
+        ax[0, 0].set_title(r'$|v^{tot}|$')
+        ax[0, 0].set_xlabel('x')
+        ax[0, 0].set_ylabel('y')
+        fig.colorbar(im0, ax=ax[0, 0])
 
-        plt.figure(2, [12, 9])
-        plt.imshow(cp.asnumpy(flow), vmax=1)
-        plt.title(r'$|v^{inc}|$')
-        plt.xlabel('x')
-        plt.ylabel('y')
-        plt.colorbar()
+        im1 = ax[0, 1].imshow(flow.get(), vmax=1)
+        ax[0, 1].set_title(r'$|v^{inc}|$')
+        ax[0, 1].set_xlabel('x')
+        ax[0, 1].set_ylabel('y')
+        fig.colorbar(im1, ax=ax[0, 1])
 
-        plt.figure(3, [12, 9])
-        plt.imshow(cp.asnumpy(cp.hypot(v_comp[0], v_comp[1])), vmax=1)
-        plt.title(r'$|v^{comp}|$')
-        plt.xlabel('x')
-        plt.ylabel('y')
-        plt.colorbar()
+        im2 = ax[1, 0].imshow(cp.hypot(v_comp[0], v_comp[1]).get(), vmax=1)
+        ax[1, 0].set_title(r'$|v^{comp}|$')
+        ax[1, 0].set_xlabel('x')
+        ax[1, 0].set_ylabel('y')
+        fig.colorbar(im2, ax=ax[1, 0])
 
         # flows are calculated by streamplot
-        plt.figure(4, [12, 9])
-        plt.imshow(cp.asnumpy(flow), vmax=0.5, cmap='viridis')
-        plt.streamplot(XX, YY, cp.asnumpy(v_inc[0]), cp.asnumpy(v_inc[1]),
-                       density=5, color='white', linewidth=1)
-        plt.title(r'$v^{inc}$')
-        plt.xlabel('x')
-        plt.ylabel('y')
-        plt.colorbar(label=r'$|v^{inc}|$')
+        im3 = ax[1, 1].imshow(flow.get(), vmax=0.5, cmap='viridis')
+        ax[1, 1].streamplot(XX, YY, v_inc[0].get(), v_inc[1].get(),
+                            density=5, color='white', linewidth=1)
+        ax[1, 1].set_title(r'$v^{inc}$')
+        ax[1, 1].set_xlabel('x')
+        ax[1, 1].set_ylabel('y')
+        fig.colorbar(im3, ax=ax[1, 1], label=r'$|v^{inc}|$')
         plt.show()
-
     return velo, v_inc, v_comp
 
 
@@ -353,7 +346,7 @@ def vortex_detection_cp(phase: cp.ndarray, plot: bool = False) -> cp.ndarray:
     vortices[len(plus_x):, 2] = -1
     if plot:
         plt.figure(1, figsize=[12, 9])
-        plt.imshow(cp.hypot(velo[0], velo[1]).get(), vmin=0, vmax=1)
+        plt.imshow(phase.get(), cmap='twilight_shifted')
         plt.scatter(vortices[:, 0].get(), vortices[:, 1].get(),
                     c=vortices[:, 2].get(), cmap='bwr')
         plt.colorbar(label="Vorticity")
@@ -481,10 +474,18 @@ def cluster_vortices(vortices: np.ndarray) -> list:
 
 
 def main():
-    phase = np.loadtxt("v500_1_phase.txt")
+    from PIL import Image
+    from contrast import im_osc, angle_fast
+    fname = "tur_density/v500_9"
+    im = np.array(Image.open(f"{fname}.tif"))
+    phase = angle_fast(im_osc(im))
+    plt.imshow(phase)
+    plt.show()
+    np.savetxt(f"{fname}_phase.gz", phase)
+    # phase = np.loadtxt("v500_1_phase.txt")
     phase_cp = cp.asarray(phase)
     # Vortex detection step
-    vortices_cp = vortex_detection_cp(phase_cp, plot=False)
+    vortices_cp = vortex_detection_cp(phase_cp, plot=True)
     vortices = vortex_detection(phase, plot=False)
     timer_repeat(vortex_detection, phase, N_repeat=25)
     timer_repeat(vortex_detection_cp, phase_cp, N_repeat=25)
@@ -503,21 +504,24 @@ def main():
     ax.streamplot(XX, YY, v_inc[0], v_inc[1],
                   density=5, color='white', linewidth=1)
     for dip in range(dipoles.shape[0]):
-        ax.plot(vortices[dipoles[dip, :], 0],
-                vortices[dipoles[dip, :], 1], color='g', marker='o')
+        ln_d, = ax.plot(vortices[dipoles[dip, :], 0],
+                        vortices[dipoles[dip, :], 1], color='g', marker='o', label='Dipoles')
     for cluster in clusters:
         cluster = list(cluster)
         if vortices[cluster[0], 2] == 1:
             c = 'r'
+            ln_p, = ax.plot(vortices[cluster, 0], vortices[cluster,
+                                                           1], marker='o', color=c, label='Plus')
         else:
             c = 'b'
-        ax.plot(vortices[cluster, 0], vortices[cluster,
-                                               1], marker='o', color=c)
+            ln_m, = ax.plot(vortices[cluster, 0], vortices[cluster,
+                                                           1], marker='o', color=c, label='Minus')
     ax.set_title(r'Incompressible velocity $|v^{inc}|$')
     ax.set_xlabel('x')
     ax.set_ylabel('y')
     ax.set_ylim(0, phase.shape[1])
     ax.set_ylim(0, phase.shape[0])
+    ax.legend(handles=[ln_d, ln_p, ln_m])
     plt.colorbar(im, ax=ax)
     plt.show()
 
