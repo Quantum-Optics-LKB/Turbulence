@@ -59,36 +59,23 @@ def timer_repeat_cp(func, *args, N_repeat=1000):
     return np.mean(t), np.std(t)
 
 
-@numba.stencil()
-def phase_sum_stencil(grad0, grad1):
-    """Computes the phase gradient winding
-
-    Args:
-        velo (np.ndarray): Phase differences. velo[0, :, :] is d/dy phi (derivative along rows).
-
-    Returns:
-        np.ndarray: The winding array.
-    """
-    cont = grad0[0, 0]
-    cont += grad0[0, 1]
-    cont -= grad0[1, 1]
-    cont -= grad0[1, 0]
-    cont -= grad1[0, 0]
-    cont += grad1[0, 1]
-    cont += grad1[1, 1]
-    cont -= grad1[1, 0]
+@numba.njit(numba.float32[:, :](numba.float32[:, :, :], numba.int64), fastmath=True, cache=True, parallel=True)
+def phase_sum(velo: np.ndarray, r: int = 1):
+    cont = np.zeros((velo.shape[1], velo.shape[2]), dtype=np.float32)
+    for i in numba.prange(velo.shape[1]):
+        for j in range(velo.shape[2]):
+            for k in range(r+1):
+                cont[i, j] += velo[0, i, (j+k) % velo.shape[2]]
+                cont[i, j] -= velo[0, (i+r) % velo.shape[1],
+                                   (j+k) % velo.shape[2]]
+                cont[i, j] += velo[1, (i+k) % velo.shape[1],
+                                   (j+r) % velo.shape[2]]
+                cont[i, j] -= velo[1, (i+k) % velo.shape[1], j]
     return cont
 
 
-@numba.njit(numba.float32[:, :](numba.float32[:, :, :]), fastmath=True, cache=True, parallel=True)
-def phase_sum(velo: np.ndarray):
-    grad0 = velo[0]
-    grad1 = velo[1]
-    return phase_sum_stencil(grad0, grad1)
-
-
-@cuda.jit((numba.float32[:, :, :], numba.float32[:, :]), fastmath=True)
-def phase_sum_cp(grad, cont):
+@cuda.jit((numba.float32[:, :, :], numba.float32[:, :], numba.int64), fastmath=True)
+def phase_sum_cp(velo, cont, r):
     """Computes the phase gradient winding
 
     Args:
@@ -99,14 +86,13 @@ def phase_sum_cp(grad, cont):
     """
     i, j = numba.cuda.grid(2)
     if i < cont.shape[0] and j < cont.shape[1]:
-        cont[i, j] = grad[0, i % cont.shape[0], j % cont.shape[1]]
-        cont[i, j] += grad[0, i % cont.shape[0], (j+1) % cont.shape[1]]
-        cont[i, j] -= grad[0, (i+1) % cont.shape[0], (j+1) % cont.shape[1]]
-        cont[i, j] -= grad[0, (i+1) % cont.shape[0], j % cont.shape[1]]
-        cont[i, j] -= grad[1, i % cont.shape[0], j % cont.shape[1]]
-        cont[i, j] += grad[1, i % cont.shape[0], (j + 1) % cont.shape[1]]
-        cont[i, j] += grad[1, (i+1) % cont.shape[0], (j+1) % cont.shape[1]]
-        cont[i, j] -= grad[1, (i+1) % cont.shape[0], j % cont.shape[1]]
+        for k in range(r+1):
+            cont[i, j] += velo[0, i, (j+k) % velo.shape[2]]
+            cont[i, j] -= velo[0, (i+r) % velo.shape[1],
+                               (j+k) % velo.shape[2]]
+            cont[i, j] += velo[1, (i+k) % velo.shape[1],
+                               (j+r) % velo.shape[2]]
+            cont[i, j] -= velo[1, (i+k) % velo.shape[1], j]
 
 
 def velocity(phase: np.ndarray, dx: float = 1) -> np.ndarray:
@@ -287,7 +273,7 @@ def helmholtz_decomp_cp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
     return velo, v_inc, v_comp
 
 
-def vortex_detection(phase: np.ndarray, plot: bool = False) -> np.ndarray:
+def vortex_detection(phase: np.ndarray, plot: bool = False, r: int = 1) -> np.ndarray:
     """Detects the vortex positions using circulation calculation
 
     Args:
@@ -298,7 +284,7 @@ def vortex_detection(phase: np.ndarray, plot: bool = False) -> np.ndarray:
         np.ndarray: A list of the vortices position and charge
     """
     velo = velocity(phase)
-    windings = phase_sum(velo)
+    windings = phase_sum(velo, r)
     plus_y, plus_x = np.where(windings > 2*np.pi)
     minus_y, minus_x = np.where(windings < -2*np.pi)
     vortices = np.zeros((len(plus_x)+len(minus_x), 3), dtype=np.float32)
@@ -319,7 +305,7 @@ def vortex_detection(phase: np.ndarray, plot: bool = False) -> np.ndarray:
     return vortices
 
 
-def vortex_detection_cp(phase: cp.ndarray, plot: bool = False) -> cp.ndarray:
+def vortex_detection_cp(phase: cp.ndarray, plot: bool = False, r: int = 1) -> cp.ndarray:
     """Detects the vortex positions using circulation calculation
 
     Args:
@@ -334,7 +320,7 @@ def vortex_detection_cp(phase: cp.ndarray, plot: bool = False) -> cp.ndarray:
     tpb = 16
     bpgx = math.ceil(windings.shape[0]/tpb)
     bpgy = math.ceil(windings.shape[1]/tpb)
-    phase_sum_cp[(bpgx, bpgy), (tpb, tpb)](velo, windings)
+    phase_sum_cp[(bpgx, bpgy), (tpb, tpb)](velo, windings, r)
     plus_y, plus_x = cp.where(windings > 2*np.pi)
     minus_y, minus_x = cp.where(windings < -2*np.pi)
     vortices = cp.zeros((len(plus_x)+len(minus_x), 3), dtype=np.float32)
@@ -485,8 +471,8 @@ def main():
     # phase = np.loadtxt("v500_1_phase.txt")
     phase_cp = cp.asarray(phase)
     # Vortex detection step
-    vortices_cp = vortex_detection_cp(phase_cp, plot=True)
-    vortices = vortex_detection(phase, plot=False)
+    vortices_cp = vortex_detection_cp(phase_cp, r=2, plot=True)
+    vortices = vortex_detection(phase, plot=True, r=1)
     timer_repeat(vortex_detection, phase, N_repeat=25)
     timer_repeat(vortex_detection_cp, phase_cp, N_repeat=25)
     # Velocity decomposition in incompressible and compressible
