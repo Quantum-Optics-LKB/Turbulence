@@ -505,7 +505,7 @@ def main():
     timer_repeat(helmholtz_decomp, phase, N_repeat=25)
     timer_repeat_cp(helmholtz_decomp_cp, phase_cp, N_repeat=25)
     # Clustering benchmarks
-    dipoles, clusters = cluster_vortices(vortices)
+    dipoles, clusters, cluster_graph = cluster_vortices(vortices)
     timer_repeat(cluster_vortices, vortices, N_repeat=100)
     # Plot results
     fig, ax = plt.subplots()
