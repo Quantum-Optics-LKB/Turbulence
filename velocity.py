@@ -427,19 +427,21 @@ def grow_clusters(vortices: np.ndarray, plus: np.ndarray, minus: np.ndarray, tre
     """
     # find kth same sign neighbors
     dists_plus, neighbors_plus = tree_plus.query(
-        vortices[plus, 0:2], k=len(plus))
+        vortices[plus, 0:2], k=len(plus)//2)
     dists_minus, neighbors_minus = tree_minus.query(
-        vortices[minus, 0:2], k=len(minus))
+        vortices[minus, 0:2], k=len(minus)//2)
     # find closest opposite neighbors
     dists_plus_opp, plus_opp = tree_minus.query(
         vortices[plus, 0:2], k=1)
     dists_minus_opp, minus_opp = tree_plus.query(
         vortices[minus, 0:2], k=1)
     # dist to closest opposite both greater than dist between q and neighbor
+    t0 = time.perf_counter()
     plus_to_add_q, plus_to_add_nei = edges_to_connect(
         neighbors_plus, dists_plus_opp, dists_plus)
     minus_to_add_q, minus_to_add_nei = edges_to_connect(
         neighbors_minus, dists_minus_opp, dists_minus)
+    t0 = time.perf_counter()
     cluster_graph.add_edges_from(
         zip(plus[plus_to_add_q], plus[neighbors_plus[plus_to_add_q, plus_to_add_nei]]))
     cluster_graph.add_edges_from(
