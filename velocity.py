@@ -4,7 +4,6 @@ Created on Wed Sep 14 20:45:44 2022
 
 @author: Tangui Aladjidi
 """
-from cProfile import label
 from scipy import spatial
 from numba import cuda
 import numba
@@ -16,7 +15,6 @@ import pyfftw
 import pickle
 import cupy as cp
 import networkx as nx
-# from cupyx.scipy import spatial as spatial_cp
 pyfftw.interfaces.cache.enable()
 
 # simple timing decorator
@@ -392,51 +390,76 @@ def build_pairs(vortices: np.ndarray, nn: np.ndarray, mutu: np.ndarray, queue: n
     return dipoles, pairs, queue
 
 
-def clustering(vortices: np.ndarray, nn: np.ndarray, queue: np.ndarray,
-               dipoles: np.ndarray, cluster_graph: nx.Graph):
-    """Sorts the vortices into clusters after the dipoles have been removed
+@numba.njit(numba.types.UniTuple(numba.int64[:], 2)(numba.int64[:, :], numba.float64[:], numba.float64[:, :]), cache=True, parallel=True)
+def edges_to_connect(neighbors: np.ndarray, dists_opp: np.ndarray, dists: np.ndarray) -> tuple:
+    """Generates arrays of edges to add applying rule 2 based on distance to closest opposite
+    and vortex to same sign neighbor distance
 
     Args:
-        vortices (np.ndarray): Vortices
-        nn (np.ndarray): Nearest neighbors
-        queue (np.ndarray): Vortices to sort
-        dipoles (np.ndarray): List of dipoles
-        cluster_graph (nx.Graph): List of clusters in graph form
+        vort (np.ndarray): Vortices list in which you try to establish connections
+        neighbors (np.ndarray): k_th neighbor matrix N_ij is the jth neighbor of ith vortex
+        dists_opp (np.ndarray): Distance to closest opposite
+        dists (np.ndarray): Distance matrix
 
     Returns:
-        None
+        tuple: (q, n) where q are the vortices to connect to n
     """
-    closest = nn[queue]
-    sgn = vortices[queue, 2]
-    sgn_closest = vortices[closest, 2]
-    # check that the neighbor has the same sign
-    establish_connection = np.equal(sgn, sgn_closest)
-    # check that it is not in a dipole
-    establish_connection = np.logical_and(
-        establish_connection, np.logical_not(np.isin(closest, dipoles)))
-    # instantiate array of edges to add
-    edges_to_add = np.zeros((np.sum(establish_connection), 2), dtype=np.int64)
-    edges_to_add[:, 0] = queue[establish_connection]
-    edges_to_add[:, 1] = nn[queue[establish_connection]]
-    # add the edges to the graph of clusters
-    cluster_graph.add_edges_from(edges_to_add)
+    # TODO work on the queue that starts on one edge of all same sign pairs + single vortices (more efficient)
+    edges_to_add = np.zeros(dists.shape, dtype=np.bool_)
+    for i in numba.prange(dists.shape[0]):
+        for j in range(1, dists.shape[1]):
+            if min(dists_opp[i], dists_opp[neighbors[i, j]]) > dists[i, j]:
+                edges_to_add[i, j] = True
+    q_to_add, nei_to_add = np.where(edges_to_add)
+    return q_to_add, nei_to_add
+
+
+def grow_clusters(vortices: np.ndarray, plus: np.ndarray, minus: np.ndarray, tree_plus: spatial.KDTree, tree_minus: spatial.KDTree, cluster_graph: nx.Graph):
+    """Grows the clusters in the graph by applying rule 2 on the remaining vortices (i.e without dipoles)
+
+    Args:
+        vortices (np.ndarray): Array of vortices (x, y, charge)
+        plus (np.ndarray): Array of positive charge vortices. Each element is the corresponding index in the vortices array.
+        minus (np.ndarray): Same for negative charge vortices
+        tree_plus (spatial.KDTree): KDTree representing the plus vortices
+        tree_minus (spatial.KDTree): Same for minus vortices
+        cluster_graph (nx.Graph): The graph representing all vortices
+    """
+    # find kth same sign neighbors
+    dists_plus, neighbors_plus = tree_plus.query(
+        vortices[plus, 0:2], k=len(plus))
+    dists_minus, neighbors_minus = tree_minus.query(
+        vortices[minus, 0:2], k=len(minus))
+    # find closest opposite neighbors
+    dists_plus_opp, plus_opp = tree_minus.query(
+        vortices[plus, 0:2], k=1)
+    dists_minus_opp, minus_opp = tree_plus.query(
+        vortices[minus, 0:2], k=1)
+    # dist to closest opposite both greater than dist between q and neighbor
+    plus_to_add_q, plus_to_add_nei = edges_to_connect(
+        neighbors_plus, dists_plus_opp, dists_plus)
+    minus_to_add_q, minus_to_add_nei = edges_to_connect(
+        neighbors_minus, dists_minus_opp, dists_minus)
+    cluster_graph.add_edges_from(
+        zip(plus[plus_to_add_q], plus[neighbors_plus[plus_to_add_q, plus_to_add_nei]]))
+    cluster_graph.add_edges_from(
+        zip(minus[minus_to_add_q], minus[neighbors_minus[minus_to_add_q, minus_to_add_nei]]))
 
 
 def cluster_vortices(vortices: np.ndarray) -> list:
-    """Clusters the vortices into dipoles, clusters and single vortices
-
-    Args:
+    """Clusters the vortices into dipomerging_clusters
         vortices (np.ndarray): Array of vortices [[x, y, l], ...]
 
     Returns:
-        list: dipoles, clusters. Clusters are a Networkx connected_components object (i.e a list of sets). 
-        It needs to be converted to list of lists for plotting. 
+        list: dipoles, clusters. Clusters are a Networkx connected_components object (i.e a list of sets).
+        It needs to be converted to list of lists for plotting.
     """
     queue = np.arange(0, vortices.shape[0], 1, dtype=np.int64)
     # store vortices in tree
     tree = spatial.KDTree(vortices[:, 0:2])
     # find nearest neighbors
-    nn = tree.query(vortices[:, 0:2], k=2, workers=-1, p=2.0)[1]
+    nn = tree.query(
+        vortices[:, 0:2], k=2)[1]
     # nn[i] is vortex i nearest neighbor
     nn = nn[:, 1]
     mutu = mutual_nearest_neighbors(nn)
@@ -446,29 +469,30 @@ def cluster_vortices(vortices: np.ndarray) -> list:
         vortices, nn, mutu, queue)
     assert 2*len(dipoles) + 2*pairs.shape[0] + \
         len(queue) == vortices.shape[0], "PROBLEM count"
+    # extract dipole free list
+    without_dipoles = np.empty(len(queue) + len(pairs), dtype=np.int64)
+    without_dipoles[0:len(queue)] = queue
+    without_dipoles[len(queue):len(queue)+len(pairs)] = pairs[:, 0]
+    # sort plus and minus
+    plus = without_dipoles[vortices[without_dipoles, 2] == 1]
+    minus = without_dipoles[vortices[without_dipoles, 2] == -1]
     # build graph to represent clusters
     cluster_graph = nx.Graph()
-    cluster_graph.add_nodes_from(pairs[:, 0], pos=vortices[pairs[:, 0], 0:2])
-    cluster_graph.add_nodes_from(pairs[:, 1], pos=vortices[pairs[:, 1], 0:2])
+    cluster_graph.add_nodes_from(pairs[:, 0])
+    cluster_graph.add_nodes_from(pairs[:, 1])
     cluster_graph.add_edges_from(pairs.tolist())
-    cluster_graph.add_nodes_from(queue, pos=vortices[queue, 0:2])
+    cluster_graph.add_nodes_from(queue)
+    tree_plus = spatial.KDTree(vortices[plus, 0:2])
+    tree_minus = spatial.KDTree(vortices[minus, 0:2])
     # RULE 2
-    clustering(
-        vortices, nn, queue, dipoles, cluster_graph)
+    grow_clusters(vortices, plus, minus, tree_plus, tree_minus, cluster_graph)
+    cluster_graph = nx.minimum_spanning_tree(cluster_graph)
     clusters = nx.connected_components(cluster_graph)
-    return dipoles, clusters
+    return dipoles, clusters, cluster_graph
 
 
 def main():
-    from PIL import Image
-    from contrast import im_osc, angle_fast
-    fname = "tur_density/v500_9"
-    im = np.array(Image.open(f"{fname}.tif"))
-    phase = angle_fast(im_osc(im))
-    plt.imshow(phase)
-    plt.show()
-    np.savetxt(f"{fname}_phase.gz", phase)
-    # phase = np.loadtxt("v500_1_phase.txt")
+    phase = np.loadtxt("v500_1_phase.txt")
     phase_cp = cp.asarray(phase)
     # Vortex detection step
     vortices_cp = vortex_detection_cp(phase_cp, r=2, plot=True)
