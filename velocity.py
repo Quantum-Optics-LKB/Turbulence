@@ -490,7 +490,106 @@ def cluster_vortices(vortices: np.ndarray) -> list:
     grow_clusters(vortices, plus, minus, tree_plus, tree_minus, cluster_graph)
     cluster_graph = nx.minimum_spanning_tree(cluster_graph)
     clusters = nx.connected_components(cluster_graph)
+    clusters = np.array([np.array(list(c)) for c in clusters], dtype=object)
     return dipoles, clusters, cluster_graph
+
+
+def cluster_histogram(clusters, plot: bool = True) -> np.ndarray:
+    """Returns a histogram of the number of members in the clusters
+
+    Args:
+        clusters (np.ndarray): A set generator comprising of the vortices clustered in connected components
+        plot (bool): Wether to plot the histogram
+    Returns:
+        hist, bin_edges (np.ndarray): Returns an histogram of the size of the clusters
+    """
+    lengths = np.array([len(c) for c in clusters])
+    hist, bin_edges = np.histogram(lengths, bins=np.max(lengths))
+    if plot:
+        plt.hist(lengths, bins=np.max(lengths))
+        plt.yscale('log')
+        plt.xlabel("Size of the cluster")
+        plt.ylabel("Number of clusters")
+        plt.xlim(1, np.max(lengths))
+        plt.title("Histogram of cluster size")
+        plt.show()
+    return hist, bin_edges
+
+
+def cluster_barycenters(vortices: np.ndarray, clusters: np.ndarray) -> np.ndarray:
+    """Returns an array of barycenters from a list of clusters
+
+    Args:
+        vortices (np.ndarray): Vortices array (x, y, l)
+        clusters (np.ndarray): Array of vortex indices [[cluster0], [cluster1], ...]
+
+    Returns:
+        np.ndarray: The array of barycenters
+    """
+    barys = np.zeros((len(clusters), 2), dtype=np.float32)
+    for k, c in enumerate(clusters):
+        length = len(c)
+        barys[k, 0] = np.sum(vortices[c, 0])/length
+        barys[k, 1] = np.sum(vortices[c, 1])/length
+    return barys
+
+
+def cluster_radii(vortices: np.ndarray, clusters: np.ndarray, barys: np.ndarray) -> np.ndarray:
+    """Computes the cluster radius
+
+    Args:
+        vortices (np.ndarray): Vortices array (x, y, l)
+        clusters (np.ndarray): Array of vortex indices [[cluster0], [cluster1], ...]
+        barys (np.ndarray): array of barycenters
+
+    Returns:
+        np.ndarray: The array of radii
+    """
+    radii = np.zeros(barys.shape[0], dtype=np.float32)
+    for k, c in enumerate(clusters):
+        length = len(c)
+        radii[k] = np.sum(np.hypot(vortices[c, 0]-barys[k, 0],
+                          vortices[c, 1]-barys[k, 1]))/length
+    return radii
+
+
+@numba.njit(numba.float32(numba.float32[:, :], numba.int64[:, :]), parallel=True, cache=True)
+def ck_(vortices: np.ndarray, neighbors: np.ndarray) -> float:
+    """Correlation kernel
+
+    Args:
+        vortices (np.ndarray): Vortices array (x, y, l)
+        neighbors (np.ndarray): Array of neighbors up to the kth neighbor
+
+    Returns:
+        float: Correlation coefficient C_k
+    """
+    N = neighbors.shape[0]
+    k = neighbors.shape[1]
+    c = 0
+    for i in numba.prange(N):
+        for j in range(k):
+            c += abs(vortices[i, 2]+vortices[j, 2])/(2*k*N)
+    return c
+
+
+def ck(vortices: np.ndarray, k: int) -> float:
+    """Computes the correlation function C_k of an array of vortices by building a KDTree to
+    speed up nearest neighbor search
+
+    Args:
+        vortices (np.ndarray): Vortices array (x,y,l)
+        k (int): The kth neighbor up until which to compute the correlation
+
+    Returns:
+        float: C_k the correlation coefficient
+    """
+    tree = spatial.KDTree(vortices[:, 0:2])
+    neighbors = tree.query(vortices[:, 0:2], k=k+1)[1]
+    # remove 0th neighbor
+    neighbors = neighbors[:, 1:]
+    c = ck_(vortices, neighbors)
+    return c
 
 
 def main():
@@ -510,31 +609,38 @@ def main():
     dipoles, clusters, cluster_graph = cluster_vortices(vortices)
     timer_repeat(cluster_vortices, vortices, N_repeat=100)
     # Plot results
-    fig, ax = plt.subplots()
+    fig, (ax, ax1) = plt.subplots(1, 2)
     YY, XX = np.indices(v_inc[0].shape)
     im = ax.imshow(np.hypot(v_inc[0], v_inc[1]), cmap='viridis')
     ax.streamplot(XX, YY, v_inc[0], v_inc[1],
                   density=5, color='white', linewidth=1)
+    positions = dict(
+        zip(cluster_graph.nodes, vortices[cluster_graph.nodes, 0:2]))
+    edge_color = []
+    for edge in cluster_graph.edges:
+        if vortices[edge[0], 2] == 1:
+            edge_color.append('r')
+        else:
+            edge_color.append('b')
+    nx.draw(cluster_graph, ax=ax, pos=positions, with_labels=False,
+            node_size=45, node_color=vortices[cluster_graph.nodes, 2], cmap='bwr', edge_color=edge_color, width=2)
     for dip in range(dipoles.shape[0]):
         ln_d, = ax.plot(vortices[dipoles[dip, :], 0],
                         vortices[dipoles[dip, :], 1], color='g', marker='o', label='Dipoles')
-    for cluster in clusters:
-        cluster = list(cluster)
-        if vortices[cluster[0], 2] == 1:
-            c = 'r'
-            ln_p, = ax.plot(vortices[cluster, 0], vortices[cluster,
-                                                           1], marker='o', color=c, label='Plus')
-        else:
-            c = 'b'
-            ln_m, = ax.plot(vortices[cluster, 0], vortices[cluster,
-                                                           1], marker='o', color=c, label='Minus')
     ax.set_title(r'Incompressible velocity $|v^{inc}|$')
     ax.set_xlabel('x')
     ax.set_ylabel('y')
     ax.set_ylim(0, phase.shape[1])
     ax.set_ylim(0, phase.shape[0])
-    ax.legend(handles=[ln_d, ln_p, ln_m])
+    ax.legend(handles=[ln_d])
     plt.colorbar(im, ax=ax)
+    bins, edges = cluster_histogram(clusters, plot=False)
+    ax1.stairs(bins, edges, fill=True)
+    ax1.set_xlabel("Size of cluster")
+    ax1.set_ylabel("Number of vortices")
+    ax1.set_xlim(1, np.max(edges))
+    ax1.set_yscale("log")
+    ax1.set_title("Histogram of cluster size")
     plt.show()
 
 
