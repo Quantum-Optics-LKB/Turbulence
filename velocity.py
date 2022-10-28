@@ -427,14 +427,14 @@ def grow_clusters(vortices: np.ndarray, plus: np.ndarray, minus: np.ndarray, tre
     """
     # find kth same sign neighbors
     dists_plus, neighbors_plus = tree_plus.query(
-        vortices[plus, 0:2], k=len(plus)//2)
+        vortices[plus, 0:2], k=len(plus)//2, workers=-1)
     dists_minus, neighbors_minus = tree_minus.query(
-        vortices[minus, 0:2], k=len(minus)//2)
+        vortices[minus, 0:2], k=len(minus)//2, workers=-1)
     # find closest opposite neighbors
     dists_plus_opp, plus_opp = tree_minus.query(
-        vortices[plus, 0:2], k=1)
+        vortices[plus, 0:2], k=1, workers=-1)
     dists_minus_opp, minus_opp = tree_plus.query(
-        vortices[minus, 0:2], k=1)
+        vortices[minus, 0:2], k=1, workers=-1)
     # dist to closest opposite both greater than dist between q and neighbor
     t0 = time.perf_counter()
     plus_to_add_q, plus_to_add_nei = edges_to_connect(
@@ -461,7 +461,7 @@ def cluster_vortices(vortices: np.ndarray) -> list:
     tree = spatial.KDTree(vortices[:, 0:2])
     # find nearest neighbors
     nn = tree.query(
-        vortices[:, 0:2], k=2)[1]
+        vortices[:, 0:2], k=2, workers=-1)[1]
     # nn[i] is vortex i nearest neighbor
     nn = nn[:, 1]
     mutu = mutual_nearest_neighbors(nn)
@@ -554,7 +554,7 @@ def cluster_radii(vortices: np.ndarray, clusters: np.ndarray, barys: np.ndarray)
 
 
 @numba.njit(numba.float32(numba.float32[:, :], numba.int64[:, :]), parallel=True, cache=True)
-def ck_(vortices: np.ndarray, neighbors: np.ndarray) -> float:
+def _ck(vortices: np.ndarray, neighbors: np.ndarray) -> float:
     """Correlation kernel
 
     Args:
@@ -588,8 +588,21 @@ def ck(vortices: np.ndarray, k: int) -> float:
     neighbors = tree.query(vortices[:, 0:2], k=k+1)[1]
     # remove 0th neighbor
     neighbors = neighbors[:, 1:]
-    c = ck_(vortices, neighbors)
+    c = _ck(vortices, neighbors)
     return c
+
+
+def point_correlations(vortices: np.ndarray, bins: np.ndarray) -> tuple:
+    """_summary_
+
+    Args:
+        vortices (np.ndarray): _description_
+        bins (np.ndarray): _description_
+
+    Returns:
+        tuple: _description_
+    """
+    pass
 
 
 def main():
