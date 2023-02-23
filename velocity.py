@@ -56,6 +56,7 @@ def timer_repeat_cp(func, *args, N_repeat=1000):
     print(f"{N_repeat} executions of {func.__name__!r} {np.mean(t):.3f} +/- {np.std(t):.3f} ms per loop (min : {np.min(t):.3f} / max : {np.max(t):.3f} ms / med: {np.median(t):.3f})")
     return np.mean(t), np.std(t)
 
+
 @numba.njit(parallel=True, cache=True, fastmath=True)
 def az_avg(image: np.ndarray, center: tuple) -> np.ndarray:
     """Calculates the azimuthally averaged radial profile.
@@ -86,7 +87,9 @@ def az_avg(image: np.ndarray, center: tuple) -> np.ndarray:
     prof /= prof_counts
     return prof
 
-# (numba.float32[:, :], numba.float32[:], numba.uint64[:], numba.tuple(numba.uint64)),     
+# (numba.float32[:, :], numba.float32[:], numba.uint64[:], numba.tuple(numba.uint64)),
+
+
 @cuda.jit(fastmath=True)
 def _az_avg_cp(image: cp.ndarray, prof: cp.ndarray, prof_counts: cp.ndarray, center: tuple):
     """Kernel for azimuthal average calculation
@@ -214,11 +217,11 @@ def velocity_cp(phase: np.ndarray, dx: float = 1) -> np.ndarray:
     return velo
 
 
-def helmholtz_decomp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
+def helmholtz_decomp(field: np.ndarray, plot=False, dx: float = 1) -> tuple:
     """Decomposes a phase picture into compressible and incompressible velocities
 
     Args:
-        phase (np.ndarray): 2D array of the field's phase
+        field (np.ndarray): 2D array of the field
         plot (bool, optional): Final plots. Defaults to True.
         dx (float, optional): Spatial sampling size in m. Defaults to 1.
     Returns:
@@ -232,13 +235,13 @@ def helmholtz_decomp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
             pyfftw.import_wisdom(wisdom)
     except FileNotFoundError:
         print("No FFT wisdom found, starting over ...")
-    sy, sx = phase.shape
+    sy, sx = field.shape
     # meshgrid in k space
     kx = 2*np.pi*np.fft.fftfreq(sx, d=dx)
     ky = 2*np.pi*np.fft.fftfreq(sy, d=dx)
     K = np.array(np.meshgrid(kx, ky))
-
-    velo = velocity(phase, dx)
+    phase = np.angle(field)
+    velo = np.abs(field)*velocity(phase, dx)
 
     v_tot = np.hypot(velo[0], velo[1])
     V_k = pyfftw.interfaces.numpy_fft.fft2(velo)
@@ -253,7 +256,7 @@ def helmholtz_decomp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
     with open("fft.wisdom", "wb") as file:
         wisdom = pyfftw.export_wisdom()
         pickle.dump(wisdom, file)
-    if plot == True:
+    if plot:
         flow = np.hypot(v_inc[0], v_inc[1])
         YY, XX = np.indices(flow.shape)
         fig, ax = plt.subplots(2, 2, figsize=[12, 9])
@@ -288,23 +291,24 @@ def helmholtz_decomp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
     return velo, v_inc, v_comp
 
 
-def helmholtz_decomp_cp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
+def helmholtz_decomp_cp(field: np.ndarray, plot=False, dx: float = 1) -> tuple:
     """Decomposes a phase picture into compressible and incompressible velocities
 
     Args:
-        phase (np.ndarray): 2D array of the field's phase
+        field (np.ndarray): 2D array of the field
         plot (bool, optional): Final plots. Defaults to True.
         dx (float, optional): Spatial sampling size in m. Defaults to 1.
     Returns:
         tuple: (velo, v_incc, v_comp) a tuple containing the velocity field,
         the incompressible velocity and compressible velocity.
     """
-    sy, sx = phase.shape
+    sy, sx = field.shape
     # meshgrid in k space
     kx = 2*np.pi*cp.fft.fftfreq(sx, d=dx)
     ky = 2*np.pi*cp.fft.fftfreq(sy, d=dx)
     K = cp.array(cp.meshgrid(kx, ky))
-    velo = velocity_cp(phase)
+    phase = cp.angle(field)
+    velo = cp.abs(field)*velocity_cp(phase)
     v_tot = cp.hypot(velo[0], velo[1])
     V_k = cp.fft.fft2(velo)
     # Helmohltz decomposition fot the compressible part
@@ -312,7 +316,7 @@ def helmholtz_decomp_cp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
     v_comp = cp.real(cp.fft.ifft2(1j*V_comp*K))
     # Helmohltz decomposition fot the incompressible part
     v_inc = velo - v_comp
-    if plot == True:
+    if plot:
         flow = cp.hypot(v_inc[0], v_inc[1])
         YY, XX = np.indices(flow.shape)
         fig, ax = plt.subplots(2, 2, figsize=[12, 9])
@@ -360,15 +364,15 @@ def energy(ucomp: np.ndarray, uinc: np.ndarray) -> tuple:
     # compressible
     Ux_c = np.abs(np.fft.fftshift(np.fft.fft2(ucomp[0])))
     Uy_c = np.abs(np.fft.fftshift(np.fft.fft2(ucomp[1])))
-    Uc = Ux_c**2 + Uy_c**2   
+    Uc = Ux_c**2 + Uy_c**2
     Ucc = np.sum(Uc)
-    
+
     # incompressible
     Ux_i = np.abs(np.fft.fftshift(np.fft.fft2(uinc[0])))
     Uy_i = np.abs(np.fft.fftshift(np.fft.fft2(uinc[1])))
-    Ui = Ux_i**2 + Uy_i**2   
+    Ui = Ux_i**2 + Uy_i**2
     Uii = np.sum(Ui)
-    
+
     return Ucc, Uii
 
 
@@ -384,20 +388,21 @@ def energy_spectrum(ucomp: np.ndarray, uinc: np.ndarray) -> np.ndarray:
         (Ucc, Uii) np.ndarray: The array containing the compressible / incompressible
         energies as a function of the wavevector k
     """
-    
+
     # compressible
     Ux_c = np.abs(np.fft.fftshift(np.fft.fft2(ucomp[0])))
     Uy_c = np.abs(np.fft.fftshift(np.fft.fft2(ucomp[1])))
-    Uc = Ux_c**2 + Uy_c**2   
+    Uc = Ux_c**2 + Uy_c**2
     Ucc = az_avg(Uc, center=(Uc.shape[1]//2, Uc.shape[0]//2))
-    
+
     # incompressible
     Ux_i = np.abs(np.fft.fftshift(np.fft.fft2(uinc[0])))
     Uy_i = np.abs(np.fft.fftshift(np.fft.fft2(uinc[1])))
-    Ui = Ux_i**2 + Uy_i**2   
+    Ui = Ux_i**2 + Uy_i**2
     Uii = az_avg(Ui, center=(Ui.shape[1]//2, Ui.shape[0]//2))
-    
+
     return Ucc, Uii
+
 
 def energy_cp(ucomp: cp.ndarray, uinc: cp.ndarray) -> tuple:
     """Computes the total energy contained in the given compressible 
@@ -413,15 +418,15 @@ def energy_cp(ucomp: cp.ndarray, uinc: cp.ndarray) -> tuple:
     # compressible
     Ux_c = cp.abs(cp.fft.fftshift(cp.fft.fft2(ucomp[0])))
     Uy_c = cp.abs(cp.fft.fftshift(cp.fft.fft2(ucomp[1])))
-    Uc = Ux_c**2 + Uy_c**2   
+    Uc = Ux_c**2 + Uy_c**2
     Ucc = cp.sum(Uc)
-    
+
     # incompressible
     Ux_i = cp.abs(cp.fft.fftshift(cp.fft.fft2(uinc[0])))
     Uy_i = cp.abs(cp.fft.fftshift(cp.fft.fft2(uinc[1])))
-    Ui = Ux_i**2 + Uy_i**2   
+    Ui = Ux_i**2 + Uy_i**2
     Uii = cp.sum(Ui)
-    
+
     return Ucc, Uii
 
 
@@ -440,16 +445,16 @@ def energy_spectrum_cp(ucomp: cp.ndarray, uinc: cp.ndarray) -> cp.ndarray:
     # compressible
     Ux_c = cp.abs(cp.fft.fftshift(cp.fft.fft2(ucomp[0])))
     Uy_c = cp.abs(cp.fft.fftshift(cp.fft.fft2(ucomp[1])))
-    Uc = Ux_c**2 + Uy_c**2   
+    Uc = Ux_c**2 + Uy_c**2
     Ucc = az_avg_cp(Uc, center=(Uc.shape[1]//2, Uc.shape[0]//2))
-    
+
     # incompressible
     Ux_i = cp.abs(cp.fft.fftshift(cp.fft.fft2(uinc[0])))
     Uy_i = cp.abs(cp.fft.fftshift(cp.fft.fft2(uinc[1])))
-    Ui = Ux_i**2 + Uy_i**2   
+    Ui = Ux_i**2 + Uy_i**2
     Uii = az_avg_cp(Ui, center=(Ui.shape[1]//2, Ui.shape[0]//2))
     return Ucc, Uii
-    
+
 
 def vortex_detection(phase: np.ndarray, plot: bool = False, r: int = 1) -> np.ndarray:
     """Detects the vortex positions using circulation calculation
@@ -784,6 +789,7 @@ def point_correlations(vortices: np.ndarray, bins: np.ndarray) -> tuple:
     """
     pass
 
+
 def drag_force(I: np.ndarray, U: np.ndarray) -> tuple:
     """Computes the drag force considering an obstacle map U(r)
     and an intensity map I(r)
@@ -829,6 +835,7 @@ def drag_force_cp(I: cp.ndarray, U: cp.ndarray) -> tuple:
         return f
     else:
         return np.array([fx.get(), fy.get()])
+
 
 def main():
     phase = np.loadtxt("v500_1_phase.txt")
