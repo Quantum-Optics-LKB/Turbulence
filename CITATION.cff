@@ -1,12 +1,10 @@
-@misc{https://doi.org/10.48550/arxiv.2211.08441,
+@article{https://doi.org/10.48550/arxiv.2211.08441,
   doi = {10.48550/ARXIV.2211.08441},
   
   url = {https://arxiv.org/abs/2211.08441},
   
   author = {Abobaker, Myrann and Liu, Wei and Aladjidi, Tangui and Bramati, Alberto and Glorieux, Quentin},
-  
-  keywords = {Quantum Gases (cond-mat.quant-gas), Quantum Physics (quant-ph), FOS: Physical sciences, FOS: Physical sciences},
-  
+    
   title = {Inverse energy cascade in two-dimensional quantum turbulence in a fluid of light},
   
   publisher = {arXiv},
