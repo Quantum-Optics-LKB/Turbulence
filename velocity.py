@@ -86,9 +86,9 @@ def az_avg(image: np.ndarray, center: tuple) -> np.ndarray:
     prof /= prof_counts
     return prof
 
-# (numba.float32[:, :], numba.float32[:], numba.uint64[:], numba.tuple(numba.uint64)),     
 @cuda.jit(fastmath=True)
-def _az_avg_cp(image: cp.ndarray, prof: cp.ndarray, prof_counts: cp.ndarray, center: tuple):
+def _az_avg_cp(image: cp.ndarray, prof: cp.ndarray, prof_counts: cp.ndarray,
+               center: tuple):
     """Kernel for azimuthal average calculation
 
     Args:
@@ -132,7 +132,8 @@ def az_avg_cp(image: cp.ndarray, center: tuple) -> cp.ndarray:
     return prof
 
 
-@numba.njit(numba.float32[:, :](numba.float32[:, :, :], numba.int64), fastmath=True, cache=True, parallel=True)
+@numba.njit(numba.float32[:, :](numba.float32[:, :, :], numba.int64), fastmath=True,
+            cache=True, parallel=True)
 def phase_sum(velo: np.ndarray, r: int = 1):
     cont = np.zeros((velo.shape[1], velo.shape[2]), dtype=np.float32)
     for i in numba.prange(velo.shape[1]):
@@ -214,11 +215,11 @@ def velocity_cp(phase: cp.ndarray, dx: float = 1) -> cp.ndarray:
     return velo
 
 
-def helmholtz_decomp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
+def helmholtz_decomp(field: np.ndarray, plot=False, dx: float = 1) -> tuple:
     """Decomposes a phase picture into compressible and incompressible velocities
 
     Args:
-        phase (np.ndarray): 2D array of the field's phase
+        field (np.ndarray): 2D array of the field
         plot (bool, optional): Final plots. Defaults to True.
         dx (float, optional): Spatial sampling size in m. Defaults to 1.
     Returns:
@@ -232,13 +233,13 @@ def helmholtz_decomp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
             pyfftw.import_wisdom(wisdom)
     except FileNotFoundError:
         print("No FFT wisdom found, starting over ...")
-    sy, sx = phase.shape
+    sy, sx = field.shape
     # meshgrid in k space
     kx = 2*np.pi*np.fft.fftfreq(sx, d=dx)
     ky = 2*np.pi*np.fft.fftfreq(sy, d=dx)
     K = np.array(np.meshgrid(kx, ky))
-
-    velo = velocity(phase, dx)
+    phase = np.angle(field)
+    velo = np.abs(field)*velocity(phase, dx)
 
     v_tot = np.hypot(velo[0], velo[1])
     V_k = pyfftw.interfaces.numpy_fft.fft2(velo)
@@ -253,7 +254,7 @@ def helmholtz_decomp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
     with open("fft.wisdom", "wb") as file:
         wisdom = pyfftw.export_wisdom()
         pickle.dump(wisdom, file)
-    if plot == True:
+    if plot:
         flow = np.hypot(v_inc[0], v_inc[1])
         YY, XX = np.indices(flow.shape)
         fig, ax = plt.subplots(2, 2, figsize=[12, 9])
@@ -288,23 +289,28 @@ def helmholtz_decomp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
     return velo, v_inc, v_comp
 
 
-def helmholtz_decomp_cp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
+def helmholtz_decomp_cp(field: np.ndarray, plot: bool =False, dx: float = 1,
+                        regularize: bool = True) -> tuple:
     """Decomposes a phase picture into compressible and incompressible velocities
 
     Args:
-        phase (np.ndarray): 2D array of the field's phase
+        field (np.ndarray): 2D array of the field
         plot (bool, optional): Final plots. Defaults to True.
         dx (float, optional): Spatial sampling size in m. Defaults to 1.
+        regularize (bool, optional): Whether to multiply speed by the amplitude or not.
     Returns:
         tuple: (velo, v_incc, v_comp) a tuple containing the velocity field,
         the incompressible velocity and compressible velocity.
     """
-    sy, sx = phase.shape
+    sy, sx = field.shape
     # meshgrid in k space
     kx = 2*np.pi*cp.fft.fftfreq(sx, d=dx)
     ky = 2*np.pi*cp.fft.fftfreq(sy, d=dx)
     K = cp.array(cp.meshgrid(kx, ky))
-    velo = velocity_cp(phase)
+    if regularize:
+        velo = cp.abs(field)*velocity_cp(cp.angle(field))
+    else:
+        velo = velocity_cp(cp.angle(field))
     v_tot = cp.hypot(velo[0], velo[1])
     V_k = cp.fft.fft2(velo)
     # Helmohltz decomposition fot the compressible part
@@ -312,32 +318,35 @@ def helmholtz_decomp_cp(phase: np.ndarray, plot=False, dx: float = 1) -> tuple:
     v_comp = cp.real(cp.fft.ifft2(1j*V_comp*K))
     # Helmohltz decomposition fot the incompressible part
     v_inc = velo - v_comp
-    if plot == True:
-        flow = cp.hypot(v_inc[0], v_inc[1])
-        YY, XX = np.indices(flow.shape)
+    if plot:
+        flow_inc = cp.hypot(v_inc[0], v_inc[1])
+        flow_comp = cp.hypot(v_comp[0], v_comp[1])
+        YY, XX = np.indices(flow_comp.shape)
         fig, ax = plt.subplots(2, 2, figsize=[12, 9])
-        im0 = ax[0, 0].imshow(v_tot.get(), vmax=1)
+        im0 = ax[0, 0].imshow(v_tot.get())
         ax[0, 0].set_title(r'$|v^{tot}|$')
         ax[0, 0].set_xlabel('x')
         ax[0, 0].set_ylabel('y')
         fig.colorbar(im0, ax=ax[0, 0])
 
-        im1 = ax[0, 1].imshow(flow.get(), vmax=1)
+        im1 = ax[0, 1].imshow(flow_inc.get())
         ax[0, 1].set_title(r'$|v^{inc}|$')
         ax[0, 1].set_xlabel('x')
         ax[0, 1].set_ylabel('y')
         fig.colorbar(im1, ax=ax[0, 1])
 
-        im2 = ax[1, 0].imshow(cp.hypot(v_comp[0], v_comp[1]).get(), vmax=1)
+        im2 = ax[1, 0].imshow(flow_comp.get())
+        ax[1, 0].streamplot(XX, YY, v_comp[0].get(), v_comp[1].get(),
+                            density=2.5, color='white', linewidth=1)
         ax[1, 0].set_title(r'$|v^{comp}|$')
         ax[1, 0].set_xlabel('x')
         ax[1, 0].set_ylabel('y')
         fig.colorbar(im2, ax=ax[1, 0])
 
         # flows are calculated by streamplot
-        im3 = ax[1, 1].imshow(flow.get(), vmax=0.5, cmap='viridis')
+        im3 = ax[1, 1].imshow(flow_inc.get(), cmap='viridis')
         ax[1, 1].streamplot(XX, YY, v_inc[0].get(), v_inc[1].get(),
-                            density=5, color='white', linewidth=1)
+                            density=2.5, color='white', linewidth=1)
         ax[1, 1].set_title(r'$v^{inc}$')
         ax[1, 1].set_xlabel('x')
         ax[1, 1].set_ylabel('y')
@@ -398,6 +407,7 @@ def energy_spectrum(ucomp: np.ndarray, uinc: np.ndarray) -> np.ndarray:
     Uii = az_avg(Ui, center=(Ui.shape[1]//2, Ui.shape[0]//2))
     
     return Ucc, Uii
+
 
 def energy_cp(ucomp: cp.ndarray, uinc: cp.ndarray) -> tuple:
     """Computes the total energy contained in the given compressible 
@@ -482,7 +492,8 @@ def vortex_detection(phase: np.ndarray, plot: bool = False, r: int = 1) -> np.nd
     return vortices
 
 
-def vortex_detection_cp(phase: cp.ndarray, plot: bool = False, r: int = 1) -> cp.ndarray:
+def vortex_detection_cp(phase: cp.ndarray, plot: bool = False,
+                        r: int = 1) -> cp.ndarray:
     """Detects the vortex positions using circulation calculation
 
     Args:
@@ -537,7 +548,8 @@ def mutual_nearest_neighbors(nn) -> np.ndarray:
     return mutu
 
 
-def build_pairs(vortices: np.ndarray, nn: np.ndarray, mutu: np.ndarray, queue: np.ndarray):
+def build_pairs(vortices: np.ndarray, nn: np.ndarray, mutu: np.ndarray,
+                queue: np.ndarray):
     """Builds the dipoles and the pairs of same sign
 
     Args:
@@ -569,8 +581,11 @@ def build_pairs(vortices: np.ndarray, nn: np.ndarray, mutu: np.ndarray, queue: n
     return dipoles, pairs, queue
 
 
-@numba.njit(numba.types.UniTuple(numba.int64[:], 2)(numba.int64[:, :], numba.float64[:], numba.float64[:, :]), cache=True, parallel=True)
-def edges_to_connect(neighbors: np.ndarray, dists_opp: np.ndarray, dists: np.ndarray) -> tuple:
+@numba.njit(numba.types.UniTuple(numba.int64[:], 2)(
+        numba.int64[:, :], numba.float64[:], numba.float64[:, :]),
+        cache=True, parallel=True)
+def edges_to_connect(neighbors: np.ndarray, dists_opp: np.ndarray, 
+                     dists: np.ndarray) -> tuple:
     """Generates arrays of edges to add applying rule 2 based on distance to closest opposite
     and vortex to same sign neighbor distance
 
@@ -593,7 +608,9 @@ def edges_to_connect(neighbors: np.ndarray, dists_opp: np.ndarray, dists: np.nda
     return q_to_add, nei_to_add
 
 
-def grow_clusters(vortices: np.ndarray, plus: np.ndarray, minus: np.ndarray, tree_plus: spatial.KDTree, tree_minus: spatial.KDTree, cluster_graph: nx.Graph):
+def grow_clusters(vortices: np.ndarray, plus: np.ndarray, minus: np.ndarray,
+                  tree_plus: spatial.KDTree, tree_minus: spatial.KDTree,
+                  cluster_graph: nx.Graph):
     """Grows the clusters in the graph by applying rule 2 on the remaining vortices (i.e without dipoles)
 
     Args:
@@ -713,7 +730,8 @@ def cluster_barycenters(vortices: np.ndarray, clusters: np.ndarray) -> np.ndarra
     return barys
 
 
-def cluster_radii(vortices: np.ndarray, clusters: np.ndarray, barys: np.ndarray) -> np.ndarray:
+def cluster_radii(vortices: np.ndarray, clusters: np.ndarray, 
+                  barys: np.ndarray) -> np.ndarray:
     """Computes the cluster radius
 
     Args:
@@ -732,7 +750,8 @@ def cluster_radii(vortices: np.ndarray, clusters: np.ndarray, barys: np.ndarray)
     return radii
 
 
-@numba.njit(numba.float32(numba.float32[:, :], numba.int64[:, :]), parallel=True, cache=True)
+@numba.njit(numba.float32(numba.float32[:, :], numba.int64[:, :]),
+            parallel=True, cache=True)
 def _ck(vortices: np.ndarray, neighbors: np.ndarray) -> float:
     """Correlation kernel
 
@@ -855,12 +874,12 @@ def pair_correlations_cp(vortices: cp.ndarray, bins: cp.ndarray) -> cp.ndarray:
     return corr 
     
 
-def drag_force(I: np.ndarray, U: np.ndarray) -> tuple:
+def drag_force(psi: np.ndarray, U: np.ndarray) -> tuple:
     """Computes the drag force considering an obstacle map U(r)
     and an intensity map I(r)
 
     Args:
-        I (np.ndarray): Intensity map
+        psi (np.ndarray): Intensity map
         U (np.ndarray): Potential map
 
     Returns:
@@ -868,19 +887,24 @@ def drag_force(I: np.ndarray, U: np.ndarray) -> tuple:
     """
     if U.dtype == np.complex64:
         U = np.real(U)
-    gradx = np.gradient(U, axis=1)
-    grady = np.gradient(U, axis=0)
-    fx = np.sum(-gradx*I)
-    fy = np.sum(-grady*I)
+    gradx = np.gradient(U, axis=-1)
+    grady = np.gradient(U, axis=-2)
+    fx = np.sum(-gradx*psi, axis=(-2, -1))
+    fy = np.sum(-grady*psi, axis=(-2, -1))
+    if psi.ndim == 3:
+        f = np.zeros((psi.shape[0], 2))
+        f[:, 0] = fx
+        f[:, 1] = fy
+        return f
     return (fx, fy)
 
 
-def drag_force_cp(I: cp.ndarray, U: cp.ndarray) -> tuple:
+def drag_force_cp(psi: cp.ndarray, U: cp.ndarray) -> tuple:
     """Computes the drag force considering an obstacle map U(r)
     and an intensity map I(r)
 
     Args:
-        I (cp.ndarray): Intensity map
+        psi (cp.ndarray): Intensity map
         U (cp.ndarray): Potential map
 
     Returns:
@@ -890,11 +914,10 @@ def drag_force_cp(I: cp.ndarray, U: cp.ndarray) -> tuple:
         U = cp.real(U)
     gradx = cp.gradient(U, axis=-1)
     grady = cp.gradient(U, axis=-2)
-    # norm = cp.sum(cp.hypot(gradx, grady))*cp.sum(I)
-    fx = cp.sum(-gradx*I, axis=(-2, -1))  # /norm
-    fy = cp.sum(-grady*I, axis=(-2, -1))  # /norm
-    if I.ndim == 3:
-        f = np.zeros((I.shape[0], 2))
+    fx = cp.sum(-gradx*psi, axis=(-2, -1))  
+    fy = cp.sum(-grady*psi, axis=(-2, -1))  
+    if psi.ndim == 3:
+        f = np.zeros((psi.shape[0], 2))
         f[:, 0] = fx.get()
         f[:, 1] = fy.get()
         return f
